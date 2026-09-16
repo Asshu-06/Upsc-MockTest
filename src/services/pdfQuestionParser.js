@@ -1,8 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist'
 
-// Configure PDF.js worker using unpkg CDN matching installed version
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version || '3.11.174'}/build/pdf.worker.min.js`
-
 /**
  * Robust PDF Question & Answer Key Parser Service
  */
@@ -12,6 +9,15 @@ export const pdfQuestionParser = {
    */
   async parsePdf(fileInput) {
     if (!fileInput) throw new Error('No PDF input provided.')
+
+    // Lazily set PDF.js workerSrc inside method call to prevent top-level module crashes
+    try {
+      if (pdfjsLib?.GlobalWorkerOptions) {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`
+      }
+    } catch (e) {
+      console.warn('PDF.js worker setup note:', e)
+    }
 
     let arrayBuffer = null
 
