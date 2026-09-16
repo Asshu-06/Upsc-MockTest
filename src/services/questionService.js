@@ -19,6 +19,16 @@ export const questionService = {
     return data || []
   },
 
+  async getExistingQuestionCount(paperId) {
+    const { count, error } = await supabase
+      .from('questions')
+      .select('*', { count: 'exact', head: true })
+      .eq('paper_id', paperId)
+
+    if (error) throw error
+    return count || 0
+  },
+
   async createQuestion(questionData) {
     const { data, error } = await supabase
       .from('questions')
@@ -28,9 +38,7 @@ export const questionService = {
 
     if (error) throw error
 
-    // Sync paper question count
     await this.updatePaperTotalQuestions(questionData.paper_id)
-
     return data
   },
 
@@ -61,33 +69,67 @@ export const questionService = {
   },
 
   async batchImportQuestions(paperId, questionsList) {
+    return this.saveQuestionsToSupabase(paperId, questionsList, false)
+  },
+
+  async saveQuestionsToSupabase(paperId, questionsList, replaceExisting = false) {
+    if (!paperId) throw new Error('Paper ID is required to save questions.')
     if (!questionsList || questionsList.length === 0) {
-      throw new Error('No questions provided for import')
+      throw new Error('No questions provided for import.')
     }
 
-    const formattedList = questionsList.map(q => ({
-      paper_id: paperId,
-      question_number: parseInt(q.question_number, 10),
-      question_text: q.question_text,
-      option_a: q.option_a,
-      option_b: q.option_b,
-      option_c: q.option_c,
-      option_d: q.option_d,
-      correct_option: q.correct_option ? String(q.correct_option).toUpperCase().trim() : 'A',
-      explanation: q.explanation || ''
-    }))
+    // 1. If replaceExisting is true, delete existing questions for paper_id
+    if (replaceExisting) {
+      const { error: delErr } = await supabase
+        .from('questions')
+        .delete()
+        .eq('paper_id', paperId)
 
-    // Use upsert on unique constraint (paper_id, question_number)
-    const { data, error } = await supabase
-      .from('questions')
-      .upsert(formattedList, { onConflict: 'paper_id,question_number' })
-      .select()
+      if (delErr) throw delErr
+    }
 
-    if (error) throw error
+    // 2. Map frontend fields to actual Supabase database schema
+    const formattedList = questionsList.map((q) => {
+      const opt = q.correct_option ? String(q.correct_option).toUpperCase().trim() : null
+      const validOpt = ['A', 'B', 'C', 'D'].includes(opt) ? opt : null
 
+      return {
+        paper_id: paperId,
+        question_number: parseInt(q.question_number, 10),
+        question_text: q.question_text || '',
+        option_a: q.option_a || '',
+        option_b: q.option_b || '',
+        option_c: q.option_c || '',
+        option_d: q.option_d || '',
+        correct_option: validOpt,
+        explanation: q.explanation || null
+      }
+    })
+
+    // 3. Batch insert in chunks of 25 items to handle large question sets safely
+    const BATCH_SIZE = 25
+    const insertedRecords = []
+
+    for (let i = 0; i < formattedList.length; i += BATCH_SIZE) {
+      const batch = formattedList.slice(i, i + BATCH_SIZE)
+
+      const { data, error } = await supabase
+        .from('questions')
+        .upsert(batch, { onConflict: 'paper_id,question_number' })
+        .select()
+
+      if (error) {
+        console.error(`Batch insert error at index ${i}:`, error)
+        throw new Error(`Database import failed at question batch (${i + 1}-${i + batch.length}): ${error.message}`)
+      }
+
+      if (data) insertedRecords.push(...data)
+    }
+
+    // 4. Update total_questions count on papers table
     await this.updatePaperTotalQuestions(paperId)
 
-    return data || []
+    return insertedRecords
   },
 
   async updatePaperTotalQuestions(paperId) {
@@ -99,7 +141,7 @@ export const questionService = {
     if (count !== null) {
       await supabase
         .from('papers')
-        .update({ total_questions: count })
+        .update({ total_questions: count, updated_at: new Date().toISOString() })
         .eq('id', paperId)
     }
   }

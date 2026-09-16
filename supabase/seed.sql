@@ -154,3 +154,9 @@ INSERT INTO public.questions (
     'Nagavali and Vamsadhara rivers originate in the Eastern Ghats (Odisha). Brahmani originates from Chota Nagpur Plateau and Subarnarekha originates near Ranchi.'
 )
 ON CONFLICT (paper_id, question_number) DO NOTHING;
+
+-- Grant Admin Role to aswaniadduri11@gmail.com
+UPDATE public.profiles
+SET role = 'admin'
+WHERE LOWER(email) = 'aswaniadduri11@gmail.com';
+

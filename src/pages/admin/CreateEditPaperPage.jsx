@@ -5,18 +5,24 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { paperSchema } from '../../lib/validations'
 import { paperService } from '../../services/paperService'
 import { storageService } from '../../services/storageService'
-import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2 } from 'lucide-react'
+import { questionService } from '../../services/questionService'
+import { PdfQuestionImporter } from '../../components/admin/PdfQuestionImporter'
+import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2, CheckCircle2, HelpCircle } from 'lucide-react'
 
 export function CreateEditPaperPage() {
   const { paperId } = useParams()
   const isEditMode = !!paperId
   const navigate = useNavigate()
 
+  const [createdPaperId, setCreatedPaperId] = useState(paperId || null)
+  const [dbQuestionCount, setDbQuestionCount] = useState(0)
+
   const [loading, setLoading] = useState(isEditMode)
   const [submitting, setSubmitting] = useState(false)
   const [pdfFile, setPdfFile] = useState(null)
   const [pdfUploadPath, setPdfUploadPath] = useState(null)
   const [serverError, setServerError] = useState(null)
+  const [successMsg, setSuccessMsg] = useState(null)
 
   const {
     register,
@@ -41,6 +47,15 @@ export function CreateEditPaperPage() {
     }
   })
 
+  const loadQuestionCount = async (pid) => {
+    try {
+      const count = await questionService.getExistingQuestionCount(pid)
+      setDbQuestionCount(count)
+    } catch (err) {
+      console.error('Error fetching question count:', err)
+    }
+  }
+
   useEffect(() => {
     if (isEditMode) {
       async function fetchPaper() {
@@ -60,6 +75,8 @@ export function CreateEditPaperPage() {
             setValue('negative_marking', paper.negative_marking)
             setValue('status', paper.status)
             if (paper.pdf_path) setPdfUploadPath(paper.pdf_path)
+            setCreatedPaperId(paper.id)
+            await loadQuestionCount(paper.id)
           }
         } catch (err) {
           console.error('Fetch paper error:', err)
@@ -75,13 +92,14 @@ export function CreateEditPaperPage() {
 
   const onSubmit = async (formData) => {
     setServerError(null)
+    setSuccessMsg(null)
     setSubmitting(true)
 
     try {
-      let currentPaperId = paperId
+      let activeId = createdPaperId
 
-      if (isEditMode) {
-        await paperService.updatePaper(paperId, {
+      if (isEditMode || activeId) {
+        await paperService.updatePaper(activeId, {
           ...formData,
           pdf_path: pdfUploadPath
         })
@@ -90,16 +108,19 @@ export function CreateEditPaperPage() {
           ...formData,
           pdf_path: pdfUploadPath
         })
-        currentPaperId = newPaper.id
+        activeId = newPaper.id
+        setCreatedPaperId(activeId)
       }
 
-      // If PDF file selected, upload to storage
-      if (pdfFile && currentPaperId) {
-        const path = await storageService.uploadPaperPdf(pdfFile, currentPaperId)
-        await paperService.updatePaper(currentPaperId, { pdf_path: path })
+      // Upload PDF to Supabase Storage if file selected
+      if (pdfFile && activeId) {
+        const path = await storageService.uploadPaperPdf(pdfFile, activeId)
+        setPdfUploadPath(path)
+        await paperService.updatePaper(activeId, { pdf_path: path })
       }
 
-      navigate('/admin/papers')
+      setSuccessMsg('Paper record saved successfully! You can now extract and import questions below.')
+      await loadQuestionCount(activeId)
     } catch (err) {
       console.error('Save paper error:', err)
       setServerError(err.message || 'Failed to save paper metadata.')
@@ -112,27 +133,73 @@ export function CreateEditPaperPage() {
     return (
       <div className="py-12 text-center">
         <Loader2 className="w-8 h-8 text-primary animate-spin mx-auto mb-3" />
-        <p className="text-xs text-body-secondary font-medium">Loading paper form...</p>
+        <p className="text-xs text-body-secondary font-medium">Loading paper workspace...</p>
       </div>
     )
   }
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-8">
       {/* Navigation */}
       <Link to="/admin/papers" className="inline-flex items-center space-x-1.5 text-xs font-semibold text-body-secondary hover:text-primary transition-colors">
         <ArrowLeft className="w-4 h-4" />
         <span>Back to Papers List</span>
       </Link>
 
-      {/* Main Form Container */}
+      {/* Status Badges Header */}
+      {createdPaperId && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* PDF Storage Status */}
+          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-card flex items-center justify-between">
+            <div>
+              <span className="text-[10px] text-body-secondary font-bold uppercase block">PDF Document Storage</span>
+              <span className="text-xs font-bold text-body-text">
+                {pdfUploadPath ? 'Uploaded to question-papers bucket' : 'No PDF document attached'}
+              </span>
+            </div>
+            {pdfUploadPath ? (
+              <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded flex items-center space-x-1">
+                <FileCheck className="w-3.5 h-3.5" />
+                <span>Uploaded</span>
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-[11px] font-bold rounded">
+                Pending
+              </span>
+            )}
+          </div>
+
+          {/* Database Questions Status */}
+          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-card flex items-center justify-between">
+            <div>
+              <span className="text-[10px] text-body-secondary font-bold uppercase block">Database Questions Status</span>
+              <span className="text-xs font-bold text-primary">
+                {dbQuestionCount > 0 ? `${dbQuestionCount} questions available in database` : 'No questions imported yet'}
+              </span>
+            </div>
+            {dbQuestionCount > 0 ? (
+              <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded flex items-center space-x-1">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Ready for Exam</span>
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 bg-amber-100 text-amber-900 text-[11px] font-bold rounded flex items-center space-x-1">
+                <HelpCircle className="w-3.5 h-3.5" />
+                <span>Action Required</span>
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Main Metadata Form Container */}
       <div className="bg-white rounded-xl border border-surface-border p-6 sm:p-8 shadow-card space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-body-text">
-            {isEditMode ? 'Edit Paper Metadata' : 'Create New Question Paper'}
+            {isEditMode ? 'Edit Paper Details' : 'Create New Question Paper'}
           </h1>
           <p className="text-xs text-body-secondary mt-1">
-            Configure exam rules, timing parameters, and upload official PDF document
+            Configure exam title, timing rules, negative marking penalties, and attach official PDF.
           </p>
         </div>
 
@@ -140,6 +207,13 @@ export function CreateEditPaperPage() {
           <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-status-error text-xs flex items-center space-x-2">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{serverError}</span>
+          </div>
+        )}
+
+        {successMsg && (
+          <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-status-success text-xs font-semibold flex items-center space-x-2">
+            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+            <span>{successMsg}</span>
           </div>
         )}
 
@@ -313,7 +387,7 @@ export function CreateEditPaperPage() {
           </div>
 
           {/* Action Buttons */}
-          <div className="pt-4 border-t border-surface-border flex justify-end space-x-3">
+          <div className="pt-4 border-t border-surface-border flex items-center justify-between">
             <Link
               to="/admin/papers"
               className="px-5 py-2.5 border border-surface-border text-body-secondary rounded-lg text-xs font-semibold hover:bg-slate-50"
@@ -330,13 +404,25 @@ export function CreateEditPaperPage() {
               ) : (
                 <>
                   <Save className="w-4 h-4" />
-                  <span>{isEditMode ? 'Update Paper' : 'Save Paper Draft'}</span>
+                  <span>{isEditMode ? 'Update Paper Details' : 'Save Paper Record'}</span>
                 </>
               )}
             </button>
           </div>
         </form>
       </div>
+
+      {/* PDF Automatic Question Extraction & Importer Section */}
+      {createdPaperId ? (
+        <PdfQuestionImporter
+          paperId={createdPaperId}
+          onImportSuccess={() => loadQuestionCount(createdPaperId)}
+        />
+      ) : (
+        <div className="bg-white rounded-xl border border-surface-border p-6 text-center text-body-secondary text-xs">
+          Save the paper record above to enable automatic PDF question extraction and importing.
+        </div>
+      )}
     </div>
   )
 }

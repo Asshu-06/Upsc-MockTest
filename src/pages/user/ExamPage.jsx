@@ -143,8 +143,12 @@ export function ExamPage() {
       <div className="min-h-screen flex items-center justify-center bg-surface-bg p-4">
         <div className="max-w-md w-full bg-white rounded-xl shadow-card border border-surface-border p-6 text-center">
           <ShieldAlert className="w-10 h-10 text-status-error mx-auto mb-3" />
-          <h2 className="text-lg font-bold text-body-text mb-2">Exam Load Error</h2>
-          <p className="text-xs text-body-secondary mb-6">{error || 'No questions available for this paper.'}</p>
+          <h2 className="text-lg font-bold text-body-text mb-2">
+            {questions.length === 0 ? "No Questions Imported" : "Exam Load Error"}
+          </h2>
+          <p className="text-xs text-body-secondary mb-6">
+            {questions.length === 0 ? "No questions have been imported for this paper yet." : (error || 'Unable to load exam.')}
+          </p>
           <button
             onClick={() => navigate('/papers')}
             className="px-4 py-2 bg-primary text-white rounded-lg text-xs font-semibold"

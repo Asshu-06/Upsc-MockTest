@@ -22,7 +22,10 @@ BEGIN
         NEW.id,
         COALESCE(NEW.raw_user_meta_data->>'full_name', SPLIT_PART(NEW.email, '@', 1)),
         NEW.email,
-        COALESCE(NEW.raw_user_meta_data->>'role', 'user')
+        CASE 
+            WHEN LOWER(NEW.email) = 'aswaniadduri11@gmail.com' THEN 'admin'
+            ELSE COALESCE(NEW.raw_user_meta_data->>'role', 'user')
+        END
     );
     RETURN NEW;
 END;
