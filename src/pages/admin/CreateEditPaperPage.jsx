@@ -465,7 +465,7 @@ export function CreateEditPaperPage() {
       </div>
 
       {/* STEPS 4, 5, 6, 7: QUESTION EXTRACTION RESULTS, PREVIEW & IMPORT */}
-      {(createdPaperId || extractionResult || extractionError) && (
+      {(createdPaperId || extractionResult || serverError) && (
         <PdfQuestionImporter
           paperId={createdPaperId}
           extractionResult={extractionResult}
