@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { pdfQuestionParser } from '../../services/pdfQuestionParser'
 import { questionService } from '../../services/questionService'
-import { FileText, Upload, CheckCircle2, AlertCircle, AlertTriangle, Loader2, Save, Trash2, Plus, RefreshCw, X } from 'lucide-react'
+import { FileText, Upload, CheckCircle2, AlertCircle, AlertTriangle, Loader2, Save, Trash2, Plus, RefreshCw, X, ChevronDown, ChevronRight, Copy } from 'lucide-react'
 
 export function PdfQuestionImporter({ paperId, onImportSuccess }) {
   const [selectedFile, setSelectedFile] = useState(null)
@@ -13,6 +13,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
   const [importing, setImporting] = useState(false)
   const [importMessage, setImportMessage] = useState(null)
 
+  const [showDebugText, setShowDebugText] = useState(false)
   const [showReplaceModal, setShowReplaceModal] = useState(false)
   const [existingCount, setExistingCount] = useState(0)
 
@@ -26,6 +27,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     setParsingResult(null)
     setQuestions([])
     setImportMessage(null)
+    setShowDebugText(false)
 
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
       setFileError('Selected file must be a PDF document.')
@@ -54,16 +56,18 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     try {
       const result = await pdfQuestionParser.parsePdf(selectedFile)
 
+      setParsingResult(result)
+
       if (result.error) {
         setFileError(result.error)
-        setParsingResult(result)
         setQuestions([])
+        setShowDebugText(true) // Auto-open debug panel when zero text or OCR error occurs
       } else {
-        setParsingResult(result)
         setQuestions(result.questions || [])
 
         if (result.questions.length === 0) {
-          setFileError('No structured questions could be detected in this PDF. Please check the formatting or import via JSON/CSV.')
+          setFileError('No questions detected. Please inspect the extracted text below.')
+          setShowDebugText(true) // Auto-open debug panel when zero questions detected
         }
       }
     } catch (err) {
@@ -123,7 +127,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     ])
   }
 
-  // Initiate Import
+  // Initiate Import (Task 9: Disabled if 0 questions)
   const handleInitiateImport = async () => {
     if (!paperId) {
       setFileError('Paper ID is missing. Please save the paper details first.')
@@ -131,7 +135,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     }
 
     if (questions.length === 0) {
-      setFileError('No questions to import.')
+      setFileError('Cannot import: 0 questions detected. Please extract questions first or edit preview.')
       return
     }
 
@@ -203,7 +207,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
             <span>Automatic PDF-to-Questions Workflow</span>
           </h3>
           <p className="text-xs text-body-secondary mt-0.5">
-            Extract selectable text, detect 4 options and answer keys in-browser, then batch import to Supabase.
+            Extract text from PDF, detect question headers, 4 options, and answer keys, then import to Supabase.
           </p>
         </div>
       </div>
@@ -267,12 +271,13 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
         </div>
       )}
 
-      {/* Post-Extraction Metadata Banner */}
-      {parsingResult && !parsingResult.error && (
+      {/* TASK 8: Preview Debug Information */}
+      {parsingResult && (
         <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
             <div className="flex items-center space-x-4">
               <span>Pages Scanned: <strong>{parsingResult.totalPages}</strong></span>
+              <span>Extracted Text Length: <strong>{parsingResult.extractedTextLength || 0} chars</strong></span>
               <span>Detected Questions: <strong>{questions.length}</strong></span>
             </div>
             <div className="flex items-center space-x-2">
@@ -298,6 +303,33 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
               <span>{parsingResult.warnings.join(' | ')}</span>
             </div>
           )}
+
+          {/* Collapsible Debug Panel for Raw Extracted Text */}
+          <div className="pt-2 border-t border-blue-200">
+            <button
+              onClick={() => setShowDebugText(!showDebugText)}
+              className="text-xs font-bold text-primary hover:underline flex items-center space-x-1"
+            >
+              {showDebugText ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+              <span>View Raw Extracted Text (Development Debugging)</span>
+            </button>
+
+            {showDebugText && (
+              <div className="mt-2 p-3 bg-slate-900 text-slate-100 rounded-lg text-xs font-mono max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
+                <div className="flex justify-between items-center pb-2 mb-2 border-b border-slate-700 text-[11px] text-slate-400">
+                  <span>Raw Text Content ({parsingResult.extractedTextLength || 0} characters)</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(parsingResult.extractedText || '')}
+                    className="flex items-center space-x-1 hover:text-white"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Text</span>
+                  </button>
+                </div>
+                {parsingResult.extractedText || 'No text extracted.'}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -325,9 +357,10 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
                 Clear Preview
               </button>
 
+              {/* TASK 9: Disabled if questions.length === 0 */}
               <button
                 onClick={handleInitiateImport}
-                disabled={importing}
+                disabled={importing || questions.length === 0}
                 className="px-5 py-1.5 bg-status-success hover:bg-emerald-700 text-white font-bold rounded-lg text-xs shadow-subtle flex items-center space-x-1.5 disabled:opacity-50"
               >
                 {importing ? (

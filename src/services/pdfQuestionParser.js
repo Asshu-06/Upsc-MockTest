@@ -4,13 +4,11 @@ import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version || '3.11.174'}/build/pdf.worker.min.js`
 
 /**
- * Service to extract text from a PDF file in the browser and parse structured UPSC objective questions and answer keys.
+ * Robust PDF Question & Answer Key Parser Service
  */
 export const pdfQuestionParser = {
   /**
    * Main entry point to parse a PDF file.
-   * @param {File} file - Browser File object
-   * @returns {Promise<Object>} Metadata and questions payload
    */
   async parsePdf(file) {
     if (!file) throw new Error('No PDF file provided.')
@@ -36,36 +34,68 @@ export const pdfQuestionParser = {
     }
 
     const totalPages = pdfDoc.numPages
+    console.log("PDF pages:", totalPages);
+
     let fullText = ''
 
-    // 3. Extract text page by page
-    for (let i = 1; i <= totalPages; i++) {
-      const page = await pdfDoc.getPage(i)
+    // 3. Extract text page by page with line-break awareness
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      const page = await pdfDoc.getPage(pageNum)
       const textContent = await page.getTextContent()
 
-      const pageStrings = textContent.items.map((item) => item.str)
-      const pageText = pageStrings.join(' ')
-      fullText += `\n--- PAGE ${i} ---\n` + pageText
+      let pageText = ''
+      let lastY = null
+
+      // Build string with Y-coordinate change detection for clean line breaks
+      for (const item of textContent.items) {
+        if (!item.str) continue
+        const currentY = item.transform ? item.transform[5] : null
+
+        if (lastY !== null && currentY !== null && Math.abs(currentY - lastY) > 5) {
+          pageText += '\n'
+        } else if (pageText.length > 0 && !pageText.endsWith('\n') && !pageText.endsWith(' ')) {
+          pageText += ' '
+        }
+
+        pageText += item.str
+        if (item.hasEOL) pageText += '\n'
+        if (currentY !== null) lastY = currentY
+      }
+
+      console.log(`Raw page text (Page ${pageNum}):`, pageText);
+      fullText += `\n--- PAGE ${pageNum} ---\n` + pageText
     }
 
-    // 4. Check for selectable text presence (OCR check)
+    console.log("Combined extracted text:", fullText);
+    console.log("Extracted text length:", fullText.length);
+
+    // 4. Scanned PDF Detection (Task 7)
     const rawCleanText = fullText.replace(/--- PAGE \d+ ---/g, '').trim()
-    if (rawCleanText.length < 50) {
+    const textLen = rawCleanText.length
+
+    if (textLen === 0 || textLen < totalPages * 25) {
+      console.warn("PDF scanned / no selectable text detected. Length:", textLen);
       return {
-        error: 'This PDF does not contain selectable text. OCR is required for scanned PDFs.',
+        error: "This PDF appears to be scanned/image-based and contains no selectable text. OCR is required.",
         totalPages,
         totalQuestions: 0,
         questions: [],
-        extractedText: ''
+        extractedText: fullText,
+        extractedTextLength: fullText.length,
+        warnings: ["No selectable text found. Scanned PDF requires OCR."]
       }
     }
 
     // 5. Parse questions & answer keys
-    const { questions, warnings, answerKeyFound } = this.extractQuestionsFromText(fullText)
+    const { questions, warnings, answerKeyFound, questionMatches } = this.extractQuestionsFromText(fullText)
+
+    console.log("Question matches:", questionMatches);
+    console.log("Parsed questions:", questions);
 
     return {
       totalPages,
       extractedText: fullText,
+      extractedTextLength: fullText.length,
       questions,
       totalQuestions: questions.length,
       validQuestionsCount: questions.filter((q) => q.isValid).length,
@@ -82,43 +112,76 @@ export const pdfQuestionParser = {
     const warnings = []
     let answerKeyFound = false
 
-    // Normalize text whitespace
+    // TASK 5: Text Normalization
     let cleanText = rawText
       .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
       .replace(/\u00A0/g, ' ')
+      .replace(/\u200B/g, '')
+      .replace(/[“„”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/[–—]/g, '-')
       .replace(/[ \t]+/g, ' ')
 
-    // Extract potential answer keys at end of document
+    // Remove page headers / footers where possible
+    cleanText = cleanText
+      .replace(/--- PAGE \d+ ---/g, '\n')
+      .replace(/Page \d+ of \d+/gi, '')
+      .replace(/\[P\.T\.O\.\]/gi, '')
+      .replace(/UPSC CIVIL SERVICES.*?(?=\n)/gi, '')
+
+    // Detect Answer Keys (Task 6)
     const answerKeyMap = this.detectAnswerKey(cleanText)
     if (Object.keys(answerKeyMap).length > 0) {
       answerKeyFound = true
+      console.log("Detected Answer Key Map:", answerKeyMap)
     } else {
-      warnings.push('No answer key detected. Correct answers must be selected manually before publishing.')
+      warnings.push("No answer key detected in PDF. Correct options must be provided before publishing.")
     }
 
-    // Split text into question blocks using regex patterns for Q1., 1., Q.1, 1), etc.
-    // Match line breaks followed by question numbers: e.g., "\n1. ", "\nQ1. ", "\n1) ", "\nQ.1 "
-    const questionRegex = /\n(?=(?:Q(?:uestion)?\.?\s*)?\d{1,3}\s*[\.\)]\s+)/gi
-    const rawBlocks = cleanText.split(questionRegex)
+    // TASK 2: Find all question start headers
+    // Regex matching question numbers: 1., 1), Q1., Q1), Q.1, Question 1:, 01., 01), [1], (1)
+    const questionHeaderRegex = /(?:^|\n)\s*(?:Q(?:uestion)?\.?\s*)?0*(\d{1,3})\s*[\.\:\)]\s+/gi
+
+    const questionMatches = []
+    let match
+
+    while ((match = questionHeaderRegex.exec(cleanText)) !== null) {
+      const qNum = parseInt(match[1], 10)
+      // Filter out reasonable range for UPSC questions (1 to 300)
+      if (qNum > 0 && qNum <= 300) {
+        questionMatches.push({
+          index: match.index,
+          headerLength: match[0].length,
+          question_number: qNum
+        })
+      }
+    }
+
+    // Isolate Answer Key section if present to avoid parsing answer key lines as questions
+    const keyHeaderIndex = cleanText.search(/(?:Answer Key|Answer Table|Key Answers|Solutions Key|ANSWERS SHEET)/i)
+    const textEndIndex = keyHeaderIndex !== -1 ? keyHeaderIndex : cleanText.length
 
     const parsedQuestions = []
 
-    rawBlocks.forEach((block, idx) => {
-      const trimmed = block.trim()
-      if (!trimmed) return
+    // TASK 4: Segment question blocks & combine multiline text
+    for (let i = 0; i < questionMatches.length; i++) {
+      const currentMatch = questionMatches[i]
+      const startIndex = currentMatch.index
+      const nextIndex = (i + 1 < questionMatches.length)
+        ? questionMatches[i + 1].index
+        : textEndIndex
 
-      // Extract question number and text body
-      const headerMatch = trimmed.match(/^(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[\.\)]\s*(.*)/s)
-      if (!headerMatch) return
+      if (startIndex >= textEndIndex) break
 
-      const qNum = parseInt(headerMatch[1], 10)
-      const qBody = headerMatch[2].trim()
+      const blockText = cleanText.substring(startIndex, Math.min(nextIndex, textEndIndex)).trim()
+      const qNum = currentMatch.question_number
 
-      // Parse options (A), (B), (C), (D) or A., B., C., D. or A), B), C), D)
-      const optionsResult = this.parseOptionsFromBody(qBody)
+      // Strip question number header from body
+      const bodyText = blockText.replace(/^(?:^|\n)\s*(?:Q(?:uestion)?\.?\s*)?0*\d{1,3}\s*[\.\:\)]\s*/i, '').trim()
 
-      // Map answer key if detected
-      const detectedAnswer = answerKeyMap[qNum] || optionsResult.detectedCorrectOption || null
+      // TASK 3: Parse options A, B, C, D (or (a), (b), A), etc.)
+      const optionsResult = this.parseOptionsFromBody(bodyText)
 
       const errors = []
       if (!optionsResult.questionText || optionsResult.questionText.length < 3) {
@@ -129,39 +192,38 @@ export const pdfQuestionParser = {
       if (!optionsResult.option_c) errors.push('Missing Option C')
       if (!optionsResult.option_d) errors.push('Missing Option D')
 
+      // Map answer key if present
+      const detectedAnswer = answerKeyMap[qNum] || optionsResult.detectedCorrectOption || null
+
       parsedQuestions.push({
         question_number: qNum,
-        question_text: optionsResult.questionText || qBody,
-        option_a: optionsResult.option_a || '',
-        option_b: optionsResult.option_b || '',
-        option_c: optionsResult.option_c || '',
-        option_d: optionsResult.option_d || '',
+        question_text: optionsResult.questionText,
+        option_a: optionsResult.option_a,
+        option_b: optionsResult.option_b,
+        option_c: optionsResult.option_c,
+        option_d: optionsResult.option_d,
         correct_option: detectedAnswer,
         explanation: optionsResult.explanation || '',
         isValid: errors.length === 0,
         errors
       })
-    })
+    }
 
-    // Sort questions by question_number ascending
+    // Sort questions by number
     parsedQuestions.sort((a, b) => a.question_number - b.question_number)
 
     return {
       questions: parsedQuestions,
       warnings,
-      answerKeyFound
+      answerKeyFound,
+      questionMatches: questionMatches.length
     }
   },
 
   /**
-   * Parse options A, B, C, D from question body text
+   * TASK 3 & 4: Parse options A, B, C, D from question body text with multiline and inline support
    */
   parseOptionsFromBody(qBody) {
-    // Look for options patterns like (A) ..., (B) ..., (C) ..., (D) ... OR A. ..., B. ... OR A) ...
-    const optRegex = /(?:[\(\[]?([A-Da-d])[\)\.\:]\s*)(.*?)(?=(?:[\(\[]?[A-Da-d][\)\.\:]\s*)|(?:Ans(?:wer)?:?)|(?:--- PAGE)|$)/gs
-
-    const matches = [...qBody.matchAll(optRegex)]
-
     let questionText = qBody
     let option_a = ''
     let option_b = ''
@@ -170,14 +232,37 @@ export const pdfQuestionParser = {
     let detectedCorrectOption = null
     let explanation = ''
 
-    if (matches.length >= 4) {
-      // The text before the first option match is the question_text
-      const firstOptIndex = matches[0].index
-      questionText = qBody.substring(0, firstOptIndex).trim()
+    // Regular expressions for options formats:
+    // Format 1: (A), (B), (C), (D) or (a), (b), (c), (d) or [A], [B]
+    const optFormat1 = /[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[\(\[][A-Da-d][\)\]])|(?:Ans(?:wer)?:?)|$)/gs
+    // Format 2: A., B., C., D. or a., b., c., d. or A), B), C), D) or a), b), c), d)
+    const optFormat2 = /(?:^|\s)([A-Da-d])[\.\)]\s+(.*?)(?=(?:\s[A-Da-d][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
+    // Format 3: 1., 2., 3., 4. (when 1-4 are used as options)
+    const optFormat3 = /(?:^|\s)([1-4])[\.\)]\s+(.*?)(?=(?:\s[1-4][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
 
+    let matches = [...qBody.matchAll(optFormat1)]
+    if (matches.length < 4) {
+      matches = [...qBody.matchAll(optFormat2)]
+    }
+    if (matches.length < 4) {
+      matches = [...qBody.matchAll(optFormat3)]
+    }
+
+    if (matches.length >= 4) {
+      // First option match index splits question text from options
+      const firstOptPos = matches[0].index
+      questionText = qBody.substring(0, firstOptPos).trim()
+
+      // Map options
       matches.forEach((m) => {
-        const key = m[1].toUpperCase()
-        const val = m[2].replace(/--- PAGE \d+ ---/g, '').replace(/\n/g, ' ').trim()
+        let key = m[1].toUpperCase()
+        // Convert numeric 1, 2, 3, 4 to A, B, C, D
+        if (key === '1') key = 'A'
+        if (key === '2') key = 'B'
+        if (key === '3') key = 'C'
+        if (key === '4') key = 'D'
+
+        const val = m[2].replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 
         if (key === 'A') option_a = val
         if (key === 'B') option_b = val
@@ -185,27 +270,50 @@ export const pdfQuestionParser = {
         if (key === 'D') option_d = val
       })
     } else {
-      // Fallback: search for inline (a), (b), (c), (d)
-      const fallbackMatches = [...qBody.matchAll(/\(([a-dA-D])\)\s*([^(\n]+)/g)]
-      if (fallbackMatches.length >= 4) {
-        const firstOptIndex = fallbackMatches[0].index
-        questionText = qBody.substring(0, firstOptIndex).trim()
+      // Fallback multiline block parser: check lines for A., B., C., D.
+      const lines = qBody.split('\n')
+      const qTextLines = []
+      let currentOptKey = null
+      const optBuffers = { A: '', B: '', C: '', D: '' }
 
-        fallbackMatches.forEach((m) => {
-          const key = m[1].toUpperCase()
-          const val = m[2].trim()
-          if (key === 'A') option_a = val
-          if (key === 'B') option_b = val
-          if (key === 'C') option_c = val
-          if (key === 'D') option_d = val
-        })
+      lines.forEach((line) => {
+        const trimmed = line.trim()
+        const optLineMatch = trimmed.match(/^[\(\[]?([A-Da-d1-4])[\)\.\:]\s*(.*)/)
+
+        if (optLineMatch) {
+          let k = optLineMatch[1].toUpperCase()
+          if (k === '1') k = 'A'
+          if (k === '2') k = 'B'
+          if (k === '3') k = 'C'
+          if (k === '4') k = 'D'
+
+          if (['A', 'B', 'C', 'D'].includes(k)) {
+            currentOptKey = k
+            optBuffers[k] = optLineMatch[2].trim()
+            return
+          }
+        }
+
+        if (currentOptKey) {
+          optBuffers[currentOptKey] += ' ' + trimmed
+        } else {
+          qTextLines.push(line)
+        }
+      })
+
+      if (optBuffers.A && optBuffers.B && optBuffers.C && optBuffers.D) {
+        questionText = qTextLines.join('\n').trim()
+        option_a = optBuffers.A.trim()
+        option_b = optBuffers.B.trim()
+        option_c = optBuffers.C.trim()
+        option_d = optBuffers.D.trim()
       }
     }
 
-    // Clean up question text headers
+    // Clean multiline question text
     questionText = questionText
-      .replace(/--- PAGE \d+ ---/g, '')
-      .replace(/\n+/g, '\n')
+      .replace(/\n+/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim()
 
     // Look for explicit inline answer line e.g., "Answer: B" or "Ans: (C)"
@@ -226,16 +334,16 @@ export const pdfQuestionParser = {
   },
 
   /**
-   * Detect Answer Key block in PDF (e.g. "Answer Key", "1 - B, 2 - C", "1. B 2. C")
+   * TASK 6: Detect Answer Key block in PDF (e.g. "Answer Key", "1-B", "1. B", "Q1: B")
    */
   detectAnswerKey(fullText) {
     const keyMap = {}
 
-    // Match patterns like "1 - B", "1. B", "1: B", "Q1: B", "1-B"
-    const pairRegex = /(?:Q(?:uestion)?\.?\s*)?(\d{1,3})\s*[\:\-\.\)]\s*[\(\[]?([A-Da-d])[\)\]]?/g
+    // Match formats: "1-B", "1. B", "1) B", "Q1: B", "1 - B"
+    const pairRegex = /(?:Q(?:uestion)?\.?\s*)?0*(\d{1,3})\s*[\:\-\.\)]\s*[\(\[]?([A-Da-d])[\)\]]?(?=\s+|$|,|\n)/g
 
-    // Search specifically in the last 30% of text or near "Answer Key" header
-    const keyHeaderIndex = fullText.search(/(?:Answer Key|Answer Table|Key Answers|Solutions Key)/i)
+    // Search specifically in Answer Key sections or end of document
+    const keyHeaderIndex = fullText.search(/(?:Answer Key|Answer Table|Key Answers|Solutions Key|ANSWERS SHEET)/i)
     const textToSearch = keyHeaderIndex !== -1 ? fullText.substring(keyHeaderIndex) : fullText
 
     const matches = [...textToSearch.matchAll(pairRegex)]
