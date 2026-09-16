@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: 30 58 138;
+    --color-primary-hover: 29 78 216;
+    --color-bg: 248 250 252;
+    --color-card: 255 255 255;
+    --color-text: 15 23 42;
+    --color-text-secondary: 100 116 139;
+    --color-border: 226 232 240;
+    --color-success: 22 163 74;
+    --color-error: 220 38 38;
+    --color-warning: 217 119 6;
+  }
+
+  body {
+    background-color: theme('colors.surface.bg');
+    color: theme('colors.body.text');
+    font-family: theme('fontFamily.sans');
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+  }
+}
+
+/* Custom scrollbar for clean academic feel */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
