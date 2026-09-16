@@ -6,8 +6,9 @@ import { paperSchema } from '../../lib/validations'
 import { paperService } from '../../services/paperService'
 import { storageService } from '../../services/storageService'
 import { questionService } from '../../services/questionService'
+import { pdfQuestionParser } from '../../services/pdfQuestionParser'
 import { PdfQuestionImporter } from '../../components/admin/PdfQuestionImporter'
-import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2, CheckCircle2, HelpCircle } from 'lucide-react'
+import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2, CheckCircle2, HelpCircle, RefreshCw, FileText, Sparkles } from 'lucide-react'
 
 export function CreateEditPaperPage() {
   const { paperId } = useParams()
@@ -19,8 +20,12 @@ export function CreateEditPaperPage() {
 
   const [loading, setLoading] = useState(isEditMode)
   const [submitting, setSubmitting] = useState(false)
+  const [extracting, setExtracting] = useState(false)
+
   const [pdfFile, setPdfFile] = useState(null)
   const [pdfUploadPath, setPdfUploadPath] = useState(null)
+  const [extractionResult, setExtractionResult] = useState(null)
+
   const [serverError, setServerError] = useState(null)
   const [successMsg, setSuccessMsg] = useState(null)
 
@@ -90,14 +95,35 @@ export function CreateEditPaperPage() {
     }
   }, [paperId, isEditMode, setValue])
 
+  // Single PDF selection handler
+  const handlePdfFileChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+
+    setServerError(null)
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+      setServerError('Selected file must be a valid PDF document.')
+      return
+    }
+
+    if (file.size > 30 * 1024 * 1024) {
+      setServerError('PDF file size must not exceed 30MB.')
+      return
+    }
+
+    setPdfFile(file)
+  }
+
+  // Primary Action: Save Paper & Extract Questions
   const onSubmit = async (formData) => {
     setServerError(null)
     setSuccessMsg(null)
     setSubmitting(true)
 
-    try {
-      let activeId = createdPaperId
+    let activeId = createdPaperId
 
+    try {
+      // 1. Create or Update Paper Record
       if (isEditMode || activeId) {
         await paperService.updatePaper(activeId, {
           ...formData,
@@ -112,20 +138,70 @@ export function CreateEditPaperPage() {
         setCreatedPaperId(activeId)
       }
 
-      // Upload PDF to Supabase Storage if file selected
+      // 2. Upload PDF to Storage if new file selected
+      let currentPath = pdfUploadPath
       if (pdfFile && activeId) {
-        const path = await storageService.uploadPaperPdf(pdfFile, activeId)
-        setPdfUploadPath(path)
-        await paperService.updatePaper(activeId, { pdf_path: path })
+        currentPath = await storageService.uploadPaperPdf(pdfFile, activeId)
+        setPdfUploadPath(currentPath)
+        await paperService.updatePaper(activeId, { pdf_path: currentPath })
       }
 
-      setSuccessMsg('Paper record saved successfully! You can now extract and import questions below.')
-      await loadQuestionCount(activeId)
+      setSuccessMsg('Paper details saved successfully!')
+
+      // 3. Trigger Automatic PDF Question Extraction if PDF file/path is available
+      if (pdfFile || currentPath) {
+        setExtracting(true)
+        let pdfInput = pdfFile
+
+        if (!pdfInput && currentPath) {
+          pdfInput = await storageService.getPdfPublicUrl(currentPath)
+        }
+
+        if (pdfInput) {
+          const result = await pdfQuestionParser.parsePdf(pdfInput)
+          setExtractionResult(result)
+
+          // Scroll to extraction results section
+          setTimeout(() => {
+            const section = document.getElementById('extraction-results-section')
+            if (section) {
+              section.scrollIntoView({ behavior: 'smooth' })
+            }
+          }, 300)
+        }
+      }
     } catch (err) {
-      console.error('Save paper error:', err)
-      setServerError(err.message || 'Failed to save paper metadata.')
+      console.error('Save paper and extract error:', err)
+      setServerError(err.message || 'Failed to save paper and extract questions.')
     } finally {
       setSubmitting(false)
+      setExtracting(false)
+    }
+  }
+
+  // Retry Extraction handler using existing file/path
+  const handleRetryExtraction = async () => {
+    if (!pdfFile && !pdfUploadPath) {
+      setServerError('Please select a PDF file first.')
+      return
+    }
+
+    setExtracting(true)
+    setServerError(null)
+
+    try {
+      let pdfInput = pdfFile
+      if (!pdfInput && pdfUploadPath) {
+        pdfInput = await storageService.getPdfPublicUrl(pdfUploadPath)
+      }
+
+      const result = await pdfQuestionParser.parsePdf(pdfInput)
+      setExtractionResult(result)
+    } catch (err) {
+      console.error('Retry extraction error:', err)
+      setServerError(err.message || 'Failed to extract questions from PDF.')
+    } finally {
+      setExtracting(false)
     }
   }
 
@@ -146,60 +222,14 @@ export function CreateEditPaperPage() {
         <span>Back to Papers List</span>
       </Link>
 
-      {/* Status Badges Header */}
-      {createdPaperId && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {/* PDF Storage Status */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-card flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-body-secondary font-bold uppercase block">PDF Document Storage</span>
-              <span className="text-xs font-bold text-body-text">
-                {pdfUploadPath ? 'Uploaded to question-papers bucket' : 'No PDF document attached'}
-              </span>
-            </div>
-            {pdfUploadPath ? (
-              <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded flex items-center space-x-1">
-                <FileCheck className="w-3.5 h-3.5" />
-                <span>Uploaded</span>
-              </span>
-            ) : (
-              <span className="px-2.5 py-1 bg-slate-100 text-slate-600 text-[11px] font-bold rounded">
-                Pending
-              </span>
-            )}
-          </div>
-
-          {/* Database Questions Status */}
-          <div className="bg-white p-4 rounded-xl border border-surface-border shadow-card flex items-center justify-between">
-            <div>
-              <span className="text-[10px] text-body-secondary font-bold uppercase block">Database Questions Status</span>
-              <span className="text-xs font-bold text-primary">
-                {dbQuestionCount > 0 ? `${dbQuestionCount} questions available in database` : 'No questions imported yet'}
-              </span>
-            </div>
-            {dbQuestionCount > 0 ? (
-              <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded flex items-center space-x-1">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Ready for Exam</span>
-              </span>
-            ) : (
-              <span className="px-2.5 py-1 bg-amber-100 text-amber-900 text-[11px] font-bold rounded flex items-center space-x-1">
-                <HelpCircle className="w-3.5 h-3.5" />
-                <span>Action Required</span>
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Main Metadata Form Container */}
+      {/* Main Integrated Form Container */}
       <div className="bg-white rounded-xl border border-surface-border p-6 sm:p-8 shadow-card space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-body-text">
             {isEditMode ? 'Edit Paper Details' : 'Create New Question Paper'}
           </h1>
           <p className="text-xs text-body-secondary mt-1">
-            Configure exam title, timing rules, negative marking penalties, and attach official PDF.
+            Fill paper metadata, upload official question paper PDF, and extract questions automatically.
           </p>
         </div>
 
@@ -218,175 +248,193 @@ export function CreateEditPaperPage() {
         )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-          {/* Title */}
-          <div>
-            <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-              Paper Title
-            </label>
-            <input
-              type="text"
-              {...register('title')}
-              placeholder="e.g. UPSC CSE Prelims 2024 General Studies Paper I"
-              className="w-full px-4 py-2.5 rounded-xl border border-surface-border text-sm focus:ring-2 focus:ring-primary focus:border-primary outline-none"
-            />
-            {errors.title && <p className="mt-1 text-xs text-status-error">{errors.title.message}</p>}
-          </div>
+          {/* STEP 1: Paper Details */}
+          <div className="space-y-4">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-primary border-b border-surface-border pb-2">
+              Step 1: Paper Metadata & Scoring Parameters
+            </h3>
 
-          {/* Grid 1: Exam Name, Exam Type, Year, Subject */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Title */}
             <div>
               <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Exam Name
+                Paper Title
               </label>
               <input
                 type="text"
-                {...register('exam_name')}
-                placeholder="UPSC CSE Prelims"
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
+                {...register('title')}
+                placeholder="e.g. UPSC CSE Prelims 2024 General Studies Paper I"
+                className="w-full px-4 py-2.5 rounded-xl border border-surface-border text-sm focus:ring-2 focus:ring-primary outline-none"
               />
-              {errors.exam_name && <p className="mt-1 text-xs text-status-error">{errors.exam_name.message}</p>}
+              {errors.title && <p className="mt-1 text-xs text-status-error">{errors.title.message}</p>}
             </div>
 
+            {/* Grid 1: Exam Name, Exam Type, Year, Subject */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
+                  Exam Name
+                </label>
+                <input
+                  type="text"
+                  {...register('exam_name')}
+                  placeholder="UPSC CSE Prelims"
+                  className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
+                />
+                {errors.exam_name && <p className="mt-1 text-xs text-status-error">{errors.exam_name.message}</p>}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
+                  Exam Type
+                </label>
+                <select
+                  {...register('exam_type')}
+                  className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none bg-white"
+                >
+                  <option value="Prelims">Prelims</option>
+                  <option value="CSAT">CSAT</option>
+                  <option value="Mains">Mains</option>
+                  <option value="Optional">Optional Subject</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
+                  Year
+                </label>
+                <input
+                  type="number"
+                  {...register('year')}
+                  className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
+                />
+                {errors.year && <p className="mt-1 text-xs text-status-error">{errors.year.message}</p>}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
+                  Subject
+                </label>
+                <input
+                  type="text"
+                  {...register('subject')}
+                  placeholder="General Studies"
+                  className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Description */}
             <div>
               <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Exam Type
+                Description / Notes
+              </label>
+              <textarea
+                rows={2}
+                {...register('description')}
+                placeholder="Provide syllabus context or instructions..."
+                className="w-full px-4 py-2 rounded-xl border border-surface-border text-sm focus:ring-2 focus:ring-primary outline-none resize-none"
+              />
+            </div>
+
+            {/* Grid 2: Timing & Scoring Parameters */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 bg-slate-50 rounded-xl border border-surface-border">
+              <div>
+                <label className="block text-[10px] font-bold text-body-text uppercase mb-1">
+                  Duration (Mins)
+                </label>
+                <input
+                  type="number"
+                  {...register('duration_minutes')}
+                  className="w-full px-3 py-1.5 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-body-text uppercase mb-1">
+                  Max Marks
+                </label>
+                <input
+                  type="number"
+                  step="0.5"
+                  {...register('maximum_marks')}
+                  className="w-full px-3 py-1.5 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-body-text uppercase mb-1">
+                  Marks / Question
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  {...register('marks_per_question')}
+                  className="w-full px-3 py-1.5 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none font-semibold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-body-text uppercase mb-1">
+                  Negative Penalty
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  {...register('negative_marking')}
+                  className="w-full px-3 py-1.5 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none font-semibold"
+                />
+              </div>
+            </div>
+
+            {/* Publication Status */}
+            <div>
+              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-1">
+                Publication Status
               </label>
               <select
-                {...register('exam_type')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none bg-white"
+                {...register('status')}
+                className="w-full sm:w-48 px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none bg-white font-semibold"
               >
-                <option value="Prelims">Prelims</option>
-                <option value="CSAT">CSAT</option>
-                <option value="Mains">Mains</option>
-                <option value="Optional">Optional Subject</option>
+                <option value="draft">Draft (Private)</option>
+                <option value="published">Published (Public)</option>
+                <option value="archived">Archived</option>
               </select>
             </div>
+          </div>
 
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Year
-              </label>
-              <input
-                type="number"
-                {...register('year')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
-              />
-              {errors.year && <p className="mt-1 text-xs text-status-error">{errors.year.message}</p>}
-            </div>
+          {/* STEP 2: SINGLE PDF UPLOAD AREA */}
+          <div className="space-y-3 pt-4 border-t border-surface-border">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-primary">
+              Step 2: Upload Official Question Paper PDF
+            </h3>
 
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Subject
+            <div className="p-5 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 space-y-3">
+              <label className="block text-xs font-bold text-body-text">
+                Upload Official Question Paper PDF
               </label>
-              <input
-                type="text"
-                {...register('subject')}
-                placeholder="General Studies"
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
-              />
+              <p className="text-xs text-body-secondary">
+                Upload the PDF containing questions, options, and answer key. Questions will be extracted automatically.
+              </p>
+
+              <div className="flex flex-col sm:flex-row items-center gap-4 pt-1">
+                <input
+                  type="file"
+                  accept="application/pdf"
+                  onChange={handlePdfFileChange}
+                  className="text-xs text-body-secondary file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-white hover:file:bg-primary-hover cursor-pointer w-full"
+                />
+
+                {(pdfFile || pdfUploadPath) && (
+                  <div className="text-xs font-semibold text-emerald-800 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200 flex items-center space-x-1.5 whitespace-nowrap">
+                    <FileCheck className="w-4 h-4 text-emerald-700" />
+                    <span>{pdfFile ? pdfFile.name : 'PDF Attached'}</span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Description */}
-          <div>
-            <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-              Description / Notes
-            </label>
-            <textarea
-              rows={3}
-              {...register('description')}
-              placeholder="Provide context or syllabus details..."
-              className="w-full px-4 py-2.5 rounded-xl border border-surface-border text-sm focus:ring-2 focus:ring-primary outline-none resize-none"
-            />
-          </div>
-
-          {/* Grid 2: Timing & Scoring Parameters */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 bg-slate-50 rounded-xl border border-surface-border">
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Duration (Mins)
-              </label>
-              <input
-                type="number"
-                {...register('duration_minutes')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Max Marks
-              </label>
-              <input
-                type="number"
-                step="0.5"
-                {...register('maximum_marks')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Marks / Question
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                {...register('marks_per_question')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-                Negative Penalty
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                {...register('negative_marking')}
-                className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs bg-white focus:ring-2 focus:ring-primary outline-none"
-              />
-            </div>
-          </div>
-
-          {/* PDF Storage Upload Section */}
-          <div className="p-4 rounded-xl border border-dashed border-slate-300 bg-slate-50/50 space-y-2">
-            <label className="block text-xs font-bold text-body-text uppercase tracking-wider">
-              Attach Official Question Paper PDF
-            </label>
-            <div className="flex items-center space-x-4">
-              <input
-                type="file"
-                accept="application/pdf"
-                onChange={(e) => setPdfFile(e.target.files[0] || null)}
-                className="text-xs text-body-secondary file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-white hover:file:bg-primary-hover cursor-pointer"
-              />
-              {pdfUploadPath && !pdfFile && (
-                <span className="text-xs text-emerald-700 font-semibold flex items-center space-x-1">
-                  <FileCheck className="w-4 h-4" />
-                  <span>PDF Uploaded</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          {/* Status Selection */}
-          <div>
-            <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-              Publication Status
-            </label>
-            <select
-              {...register('status')}
-              className="w-full sm:w-48 px-3 py-2 rounded-lg border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none bg-white font-semibold"
-            >
-              <option value="draft">Draft (Private)</option>
-              <option value="published">Published (Public)</option>
-              <option value="archived">Archived</option>
-            </select>
-          </div>
-
-          {/* Action Buttons */}
+          {/* STEP 3: PRIMARY ACTION BUTTON */}
           <div className="pt-4 border-t border-surface-border flex items-center justify-between">
             <Link
               to="/admin/papers"
@@ -394,17 +442,21 @@ export function CreateEditPaperPage() {
             >
               Cancel
             </Link>
+
             <button
               type="submit"
-              disabled={submitting}
-              className="px-6 py-2.5 bg-primary hover:bg-primary-hover text-white rounded-lg text-xs font-bold shadow-subtle flex items-center space-x-1.5 disabled:opacity-50"
+              disabled={submitting || extracting}
+              className="px-8 py-3 bg-primary hover:bg-primary-hover text-white rounded-xl font-bold text-sm shadow-card flex items-center space-x-2 disabled:opacity-50 transition-all"
             >
-              {submitting ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+              {submitting || extracting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>{extracting ? 'Extracting questions from PDF...' : 'Saving paper details...'}</span>
+                </>
               ) : (
                 <>
-                  <Save className="w-4 h-4" />
-                  <span>{isEditMode ? 'Update Paper Details' : 'Save Paper Record'}</span>
+                  <Sparkles className="w-4 h-4 fill-white" />
+                  <span>{isEditMode ? 'Update Paper & Extract Questions' : 'Save Paper & Extract Questions'}</span>
                 </>
               )}
             </button>
@@ -412,16 +464,16 @@ export function CreateEditPaperPage() {
         </form>
       </div>
 
-      {/* PDF Automatic Question Extraction & Importer Section */}
-      {createdPaperId ? (
+      {/* STEPS 4, 5, 6, 7: QUESTION EXTRACTION RESULTS, PREVIEW & IMPORT */}
+      {(createdPaperId || extractionResult || extractionError) && (
         <PdfQuestionImporter
           paperId={createdPaperId}
+          extractionResult={extractionResult}
+          extracting={extracting}
+          extractionError={serverError}
+          onRetryExtraction={handleRetryExtraction}
           onImportSuccess={() => loadQuestionCount(createdPaperId)}
         />
-      ) : (
-        <div className="bg-white rounded-xl border border-surface-border p-6 text-center text-body-secondary text-xs">
-          Save the paper record above to enable automatic PDF question extraction and importing.
-        </div>
       )}
     </div>
   )

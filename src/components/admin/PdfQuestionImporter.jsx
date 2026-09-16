@@ -1,89 +1,44 @@
-import React, { useState } from 'react'
-import { pdfQuestionParser } from '../../services/pdfQuestionParser'
+import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { questionService } from '../../services/questionService'
-import { FileText, Upload, CheckCircle2, AlertCircle, AlertTriangle, Loader2, Save, Trash2, Plus, RefreshCw, X, ChevronDown, ChevronRight, Copy } from 'lucide-react'
+import { FileText, CheckCircle2, AlertCircle, AlertTriangle, Loader2, Save, Trash2, Plus, RefreshCw, ChevronDown, ChevronRight, Copy, Eye, ExternalLink, ArrowLeft } from 'lucide-react'
 
-export function PdfQuestionImporter({ paperId, onImportSuccess }) {
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [extracting, setExtracting] = useState(false)
-  const [parsingResult, setParsingResult] = useState(null)
-
+export function PdfQuestionImporter({
+  paperId,
+  extractionResult,
+  extracting,
+  extractionError,
+  onRetryExtraction,
+  onImportSuccess
+}) {
   const [questions, setQuestions] = useState([])
   const [fileError, setFileError] = useState(null)
   const [importing, setImporting] = useState(false)
-  const [importMessage, setImportMessage] = useState(null)
+  const [importSuccessMsg, setImportSuccessMsg] = useState(null)
 
   const [showDebugText, setShowDebugText] = useState(false)
   const [showReplaceModal, setShowReplaceModal] = useState(false)
   const [existingCount, setExistingCount] = useState(0)
 
-  // Handle PDF file selection
-  const handleFileChange = (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-
-    setSelectedFile(file)
-    setFileError(null)
-    setParsingResult(null)
-    setQuestions([])
-    setImportMessage(null)
-    setShowDebugText(false)
-
-    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      setFileError('Selected file must be a PDF document.')
-      setSelectedFile(null)
-      return
-    }
-
-    if (file.size > 30 * 1024 * 1024) {
-      setFileError('PDF file size must not exceed 30MB.')
-      setSelectedFile(null)
-      return
-    }
-  }
-
-  // Extract questions from PDF via PDF.js
-  const handleExtract = async () => {
-    if (!selectedFile) {
-      setFileError('Please select a PDF file first.')
-      return
-    }
-
-    setExtracting(true)
-    setFileError(null)
-    setImportMessage(null)
-
-    try {
-      const result = await pdfQuestionParser.parsePdf(selectedFile)
-
-      setParsingResult(result)
-
-      if (result.error) {
-        setFileError(result.error)
-        setQuestions([])
-        setShowDebugText(true) // Auto-open debug panel when zero text or OCR error occurs
-      } else {
-        setQuestions(result.questions || [])
-
-        if (result.questions.length === 0) {
-          setFileError('No questions detected. Please inspect the extracted text below.')
-          setShowDebugText(true) // Auto-open debug panel when zero questions detected
-        }
+  // Sync questions from extractionResult
+  useEffect(() => {
+    if (extractionResult?.questions) {
+      setQuestions(extractionResult.questions)
+      if (extractionResult.questions.length === 0) {
+        setShowDebugText(true)
       }
-    } catch (err) {
-      console.error('PDF extraction error:', err)
-      setFileError(err.message || 'Failed to extract questions from PDF.')
-    } finally {
-      setExtracting(false)
+    } else {
+      setQuestions([])
     }
-  }
+    setFileError(extractionError || null)
+    setImportSuccessMsg(null)
+  }, [extractionResult, extractionError])
 
   // Handle inline question edits
   const handleQuestionChange = (index, field, value) => {
     const updated = [...questions]
     const q = { ...updated[index], [field]: value }
 
-    // Re-validate row
     const errors = []
     if (!q.question_text || q.question_text.trim().length < 3) errors.push('Missing question text')
     if (!q.option_a) errors.push('Missing Option A')
@@ -104,7 +59,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     setQuestions(updated)
   }
 
-  // Add a new manual question item to preview
+  // Add a new manual question item
   const handleAddQuestion = () => {
     const nextNum = questions.length > 0
       ? Math.max(...questions.map((q) => q.question_number)) + 1
@@ -127,7 +82,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     ])
   }
 
-  // Initiate Import (Task 9: Disabled if 0 questions)
+  // Initiate Import
   const handleInitiateImport = async () => {
     if (!paperId) {
       setFileError('Paper ID is missing. Please save the paper details first.')
@@ -135,13 +90,12 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     }
 
     if (questions.length === 0) {
-      setFileError('Cannot import: 0 questions detected. Please extract questions first or edit preview.')
+      setFileError('Cannot import 0 questions. Please extract questions or edit preview.')
       return
     }
 
     setFileError(null)
 
-    // Check if database already has questions for paper_id
     try {
       const existing = await questionService.getExistingQuestionCount(paperId)
       if (existing > 0) {
@@ -157,12 +111,12 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     }
   }
 
-  // Execute Supabase insert batch
+  // Execute Supabase batch insert
   const executeImport = async (replaceExisting) => {
     setShowReplaceModal(false)
     setImporting(true)
     setFileError(null)
-    setImportMessage(null)
+    setImportSuccessMsg(null)
 
     try {
       const validQuestions = questions.map((q) => ({
@@ -182,7 +136,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
         replaceExisting
       )
 
-      setImportMessage(`${inserted.length} questions imported successfully into Supabase!`)
+      setImportSuccessMsg(`Successfully imported ${inserted.length} questions. This paper is ready for the exam!`)
 
       if (onImportSuccess) {
         onImportSuccess(inserted.length)
@@ -195,147 +149,162 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
     }
   }
 
+  if (extracting) {
+    return (
+      <div className="bg-white rounded-xl border border-surface-border p-8 text-center space-y-3 shadow-card">
+        <Loader2 className="w-8 h-8 text-primary animate-spin mx-auto" />
+        <h4 className="text-sm font-bold text-body-text">Extracting questions, options, and answer keys from PDF...</h4>
+        <p className="text-xs text-body-secondary">Parsing PDF text structure in-browser. Please wait...</p>
+      </div>
+    )
+  }
+
+  if (!extractionResult && !fileError) {
+    return null
+  }
+
   const validCount = questions.filter((q) => q.isValid).length
   const incompleteCount = questions.length - validCount
 
   return (
-    <div className="bg-white rounded-xl border border-surface-border p-6 shadow-card space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-surface-border pb-4 gap-2">
-        <div>
-          <h3 className="text-base font-bold text-body-text flex items-center space-x-2">
-            <FileText className="w-5 h-5 text-primary" />
-            <span>Automatic PDF-to-Questions Workflow</span>
-          </h3>
-          <p className="text-xs text-body-secondary mt-0.5">
-            Extract text from PDF, detect question headers, 4 options, and answer keys, then import to Supabase.
-          </p>
-        </div>
-      </div>
-
-      {/* File Upload & Extract Action Controls */}
-      <div className="p-5 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 space-y-4">
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="w-full sm:w-auto flex-1">
-            <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-2">
-              Select Question Paper PDF
-            </label>
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={handleFileChange}
-              className="text-xs text-body-secondary file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-white hover:file:bg-primary-hover cursor-pointer w-full"
-            />
+    <div id="extraction-results-section" className="space-y-6">
+      {/* Question Extraction Results Header Card */}
+      <div className="bg-white rounded-xl border border-surface-border p-6 shadow-card space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-surface-border pb-4 gap-2">
+          <div>
+            <h3 className="text-base font-bold text-body-text flex items-center space-x-2">
+              <FileText className="w-5 h-5 text-primary" />
+              <span>Question Extraction Results</span>
+            </h3>
+            <p className="text-xs text-body-secondary mt-0.5">
+              Review page extraction metrics and text parsing results.
+            </p>
           </div>
 
-          <button
-            onClick={handleExtract}
-            disabled={!selectedFile || extracting}
-            className="w-full sm:w-auto px-6 py-2.5 bg-primary hover:bg-primary-hover text-white rounded-lg text-xs font-bold shadow-subtle flex items-center justify-center space-x-2 disabled:opacity-50"
-          >
-            {extracting ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Extracting questions from PDF...</span>
-              </>
-            ) : (
-              <>
-                <Upload className="w-4 h-4" />
-                <span>Extract Questions</span>
-              </>
-            )}
-          </button>
+          {onRetryExtraction && (
+            <button
+              onClick={onRetryExtraction}
+              className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-body-text font-bold rounded-lg text-xs flex items-center space-x-1.5 self-start sm:self-auto"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Extraction</span>
+            </button>
+          )}
         </div>
 
-        {selectedFile && (
-          <p className="text-xs font-semibold text-primary">
-            Selected File: <strong>{selectedFile.name}</strong> ({(selectedFile.size / (1024 * 1024)).toFixed(2)} MB)
-          </p>
+        {/* Errors & Alerts */}
+        {fileError && (
+          <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-status-error text-xs flex items-start space-x-2">
+            <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-bold">Extraction Warning / Error:</span>
+              <p>{fileError}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Success Message Banner */}
+        {importSuccessMsg && (
+          <div className="p-5 rounded-xl bg-emerald-50 border border-emerald-200 text-status-success space-y-3">
+            <div className="flex items-center space-x-2 font-bold text-sm">
+              <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
+              <span>{importSuccessMsg}</span>
+            </div>
+
+            {/* Step 7: Post-Import Navigation Actions */}
+            <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-emerald-200">
+              <Link
+                to={`/admin/papers/${paperId}/questions`}
+                className="px-4 py-2 bg-primary hover:bg-primary-hover text-white rounded-lg text-xs font-bold shadow-subtle flex items-center space-x-1.5"
+              >
+                <Eye className="w-4 h-4" />
+                <span>View Questions</span>
+              </Link>
+              <Link
+                to={`/exam/${paperId}`}
+                target="_blank"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-subtle flex items-center space-x-1.5"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>Preview Exam</span>
+              </Link>
+              <Link
+                to="/admin/papers"
+                className="px-4 py-2 border border-emerald-300 text-emerald-900 hover:bg-emerald-100 rounded-lg text-xs font-semibold"
+              >
+                Back to Papers
+              </Link>
+            </div>
+          </div>
+        )}
+
+        {/* Metrics Grid */}
+        {extractionResult && (
+          <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 text-xs font-semibold">
+              <div className="flex flex-wrap items-center gap-4">
+                <span>Pages Scanned: <strong>{extractionResult.totalPages || 0}</strong></span>
+                <span>Extracted Text Length: <strong>{extractionResult.extractedTextLength || 0} chars</strong></span>
+                <span>Questions Detected: <strong>{questions.length}</strong></span>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-[11px] font-bold">
+                  {validCount} Complete
+                </span>
+                {incompleteCount > 0 && (
+                  <span className="px-2.5 py-1 rounded bg-amber-100 text-amber-900 text-[11px] font-bold">
+                    {incompleteCount} Flagged Incomplete
+                  </span>
+                )}
+                <span className={`px-2.5 py-1 rounded text-[11px] font-bold ${
+                  extractionResult.answerKeyFound ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'
+                }`}>
+                  {extractionResult.answerKeyFound ? 'Answer Key Detected' : 'Answer Key Not Found'}
+                </span>
+              </div>
+            </div>
+
+            {extractionResult.warnings && extractionResult.warnings.length > 0 && (
+              <div className="text-[11px] text-amber-900 bg-amber-50 p-2.5 rounded-lg border border-amber-200 flex items-start space-x-2">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-700" />
+                <span>{extractionResult.warnings.join(' | ')}</span>
+              </div>
+            )}
+
+            {/* Collapsible Debug Panel for Raw Extracted Text */}
+            <div className="pt-2 border-t border-blue-200">
+              <button
+                onClick={() => setShowDebugText(!showDebugText)}
+                className="text-xs font-bold text-primary hover:underline flex items-center space-x-1"
+              >
+                {showDebugText ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                <span>View Raw Extracted Text (Development Debugging)</span>
+              </button>
+
+              {showDebugText && (
+                <div className="mt-2 p-3 bg-slate-900 text-slate-100 rounded-lg text-xs font-mono max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
+                  <div className="flex justify-between items-center pb-2 mb-2 border-b border-slate-700 text-[11px] text-slate-400">
+                    <span>Raw Assembled Text Content ({extractionResult.extractedTextLength || 0} characters)</span>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(extractionResult.extractedText || '')}
+                      className="flex items-center space-x-1 hover:text-white"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Text</span>
+                    </button>
+                  </div>
+                  {extractionResult.extractedText || 'No text extracted.'}
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Error & Warning Alerts */}
-      {fileError && (
-        <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-status-error text-xs flex items-start space-x-2">
-          <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <span className="font-bold">Extraction Warning / Error:</span>
-            <p>{fileError}</p>
-          </div>
-        </div>
-      )}
-
-      {importMessage && (
-        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-status-success text-xs font-semibold flex items-center space-x-2">
-          <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-          <span>{importMessage}</span>
-        </div>
-      )}
-
-      {/* TASK 8: Preview Debug Information */}
-      {parsingResult && (
-        <div className="p-4 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
-            <div className="flex items-center space-x-4">
-              <span>Pages Scanned: <strong>{parsingResult.totalPages}</strong></span>
-              <span>Extracted Text Length: <strong>{parsingResult.extractedTextLength || 0} chars</strong></span>
-              <span>Detected Questions: <strong>{questions.length}</strong></span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className="px-2.5 py-1 rounded bg-emerald-100 text-emerald-800 text-[11px] font-bold">
-                {validCount} Complete
-              </span>
-              {incompleteCount > 0 && (
-                <span className="px-2.5 py-1 rounded bg-amber-100 text-amber-900 text-[11px] font-bold">
-                  {incompleteCount} Flagged Incomplete
-                </span>
-              )}
-              <span className={`px-2.5 py-1 rounded text-[11px] font-bold ${
-                parsingResult.answerKeyFound ? 'bg-indigo-100 text-indigo-800' : 'bg-amber-100 text-amber-800'
-              }`}>
-                {parsingResult.answerKeyFound ? 'Answer Key Detected' : 'Answer Key Not Found'}
-              </span>
-            </div>
-          </div>
-
-          {parsingResult.warnings && parsingResult.warnings.length > 0 && (
-            <div className="text-[11px] text-amber-900 bg-amber-50 p-2.5 rounded-lg border border-amber-200 flex items-start space-x-2">
-              <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-700" />
-              <span>{parsingResult.warnings.join(' | ')}</span>
-            </div>
-          )}
-
-          {/* Collapsible Debug Panel for Raw Extracted Text */}
-          <div className="pt-2 border-t border-blue-200">
-            <button
-              onClick={() => setShowDebugText(!showDebugText)}
-              className="text-xs font-bold text-primary hover:underline flex items-center space-x-1"
-            >
-              {showDebugText ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-              <span>View Raw Extracted Text (Development Debugging)</span>
-            </button>
-
-            {showDebugText && (
-              <div className="mt-2 p-3 bg-slate-900 text-slate-100 rounded-lg text-xs font-mono max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
-                <div className="flex justify-between items-center pb-2 mb-2 border-b border-slate-700 text-[11px] text-slate-400">
-                  <span>Raw Text Content ({parsingResult.extractedTextLength || 0} characters)</span>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(parsingResult.extractedText || '')}
-                    className="flex items-center space-x-1 hover:text-white"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy Text</span>
-                  </button>
-                </div>
-                {parsingResult.extractedText || 'No text extracted.'}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Questions Preview & Interactive Editor */}
       {questions.length > 0 && (
-        <div className="space-y-4">
+        <div className="bg-white rounded-xl border border-surface-border p-6 shadow-card space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-surface-border pb-3">
             <h4 className="text-sm font-bold text-body-text uppercase tracking-wider">
               Extracted Questions Preview & Editor ({questions.length} Items)
@@ -357,7 +326,6 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
                 Clear Preview
               </button>
 
-              {/* TASK 9: Disabled if questions.length === 0 */}
               <button
                 onClick={handleInitiateImport}
                 disabled={importing || questions.length === 0}
@@ -509,7 +477,7 @@ export function PdfQuestionImporter({ paperId, onImportSuccess }) {
         </div>
       )}
 
-      {/* Duplicate / Existing Question Replacement Modal */}
+      {/* Duplicate Replacement Modal */}
       {showReplaceModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-modal border border-surface-border space-y-4">
