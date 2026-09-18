@@ -284,35 +284,8 @@ serve(async (req: any) => {
       text: `Analyze page ${pageNumber} visually. Detect all multiple-choice questions, option letters/text, and identify any visibly marked/ticked/circled/highlighted answers. Return structured JSON strictly adhering to the schema.`,
     });
 
-    // Call Gemini API server-side with candidate model fallback chain
-    let candidateModels = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-latest"];
-    
-    // Dynamically discover supported models for this specific API key
-    try {
-      const modelsListRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiApiKey}`);
-      if (modelsListRes.ok) {
-        const modelsData = await modelsListRes.json();
-        if (modelsData.models && Array.isArray(modelsData.models)) {
-          const validModels = modelsData.models
-            .filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
-            .map((m: any) => String(m.name || "").replace(/^models\//, ""))
-            .filter(Boolean);
-
-          if (validModels.length > 0) {
-            // Prioritize flash models, then pro models, then remaining models
-            const flashModels = validModels.filter(m => m.includes("flash"));
-            const otherModels = validModels.filter(m => !m.includes("flash"));
-            candidateModels = Array.from(new Set([...flashModels, ...otherModels, ...candidateModels]));
-          }
-        }
-      } else {
-        const mErrText = await modelsListRes.text();
-        console.warn("ListModels API returned status", modelsListRes.status, mErrText);
-      }
-    } catch (mErr: any) {
-      console.warn("Failed to fetch dynamic model list:", mErr.message);
-    }
-
+    // Call Gemini API server-side using high-speed gemini-1.5-flash model (fallback to gemini-1.5-pro)
+    const candidateModels = ["gemini-1.5-flash", "gemini-1.5-pro"];
     let geminiRes: any = null;
     const modelErrors: string[] = [];
 
@@ -341,7 +314,13 @@ serve(async (req: any) => {
       const errText = await res.text();
       console.warn(`Model ${modelName} call returned status ${res.status}:`, errText);
       modelErrors.push(`[${modelName} (${res.status})]: ${errText}`);
-      geminiRes = res;
+      
+      if (res.status === 404 || res.status === 429) {
+        continue;
+      } else {
+        geminiRes = res;
+        break;
+      }
     }
 
     if (!geminiRes || !geminiRes.ok) {
