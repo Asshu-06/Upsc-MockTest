@@ -284,64 +284,42 @@ serve(async (req: any) => {
       text: `Analyze page ${pageNumber} visually. Detect all multiple-choice questions, option letters/text, and identify any visibly marked/ticked/circled/highlighted answers. Return structured JSON strictly adhering to the schema.`,
     });
 
-    // Call Gemini API server-side using high-speed gemini-1.5-flash model (fallback to gemini-1.5-pro)
-    const candidateModels = ["gemini-1.5-flash", "gemini-1.5-pro"];
-    let geminiRes: any = null;
-    const modelErrors: string[] = [];
+    // Call Gemini API server-side using gemini-2.5-flash model endpoint
+    const modelName = "gemini-2.5-flash";
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
-    for (const modelName of candidateModels) {
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-      const res = await fetch(geminiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": geminiApiKey,
+    const geminiRes = await fetch(geminiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": geminiApiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json",
         },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: "application/json",
-          },
-        }),
-      });
+      }),
+    });
 
-      if (res.ok) {
-        geminiRes = res;
-        break;
-      }
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      console.error("Gemini API server error:", errText);
 
-      const errText = await res.text();
-      console.warn(`Model ${modelName} call returned status ${res.status}:`, errText);
-      modelErrors.push(`[${modelName} (${res.status})]: ${errText}`);
-      
-      if (res.status === 404 || res.status === 429) {
-        continue;
-      } else {
-        geminiRes = res;
-        break;
-      }
-    }
-
-    if (!geminiRes || !geminiRes.ok) {
-      const aggregatedError = modelErrors.join(" | ");
-      console.error("Gemini API server error across candidate models:", aggregatedError);
-
-      let safeErrorMessage = aggregatedError;
+      let safeErrorMessage = errText;
       try {
-        const lastErr = modelErrors[modelErrors.length - 1];
-        const parsedJson = JSON.parse(lastErr.substring(lastErr.indexOf("{")));
-        safeErrorMessage = parsedJson.error?.message || aggregatedError;
+        const parsedJson = JSON.parse(errText);
+        safeErrorMessage = parsedJson.error?.message || errText;
       } catch (e) {}
 
       return new Response(
         JSON.stringify({
           error: "Gemini API request failed",
           details: safeErrorMessage,
-          allErrors: modelErrors
         }),
         {
-          status: geminiRes ? (geminiRes.status >= 500 ? 502 : geminiRes.status) : 502,
+          status: geminiRes.status >= 500 ? 502 : geminiRes.status,
           headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
         }
       );
