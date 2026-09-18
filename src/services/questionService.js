@@ -90,28 +90,52 @@ export const questionService = {
 
     // 2. Map frontend fields to actual Supabase database schema
     const formattedList = questionsList.map((q) => {
-      const opt = q.correct_option ? String(q.correct_option).toUpperCase().trim() : null
+      const opt = q.correct_option || q.marked_answer ? String(q.correct_option || q.marked_answer).toUpperCase().trim() : null
       const validOpt = ['A', 'B', 'C', 'D'].includes(opt) ? opt : null
+
+      // Options mapping (support both option_a / options array)
+      let optA = q.option_a || ''
+      let optB = q.option_b || ''
+      let optC = q.option_c || ''
+      let optD = q.option_d || ''
+
+      if (Array.isArray(q.options)) {
+        q.options.forEach((o) => {
+          if (o.label === 'A') optA = o.text
+          if (o.label === 'B') optB = o.text
+          if (o.label === 'C') optC = o.text
+          if (o.label === 'D') optD = o.text
+        })
+      }
 
       return {
         paper_id: paperId,
         question_number: parseInt(q.question_number, 10),
         question_text: q.question_text || '',
-        option_a: q.option_a || '',
-        option_b: q.option_b || '',
-        option_c: q.option_c || '',
-        option_d: q.option_d || '',
+        option_a: optA,
+        option_b: optB,
+        option_c: optC,
+        option_d: optD,
         correct_option: validOpt,
-        explanation: q.explanation || null
+        explanation: q.explanation || q.extraction_notes || null
       }
     })
+
+    // Deduplicate formatted list by question_number to ensure PostgreSQL ON CONFLICT DO UPDATE never encounters duplicate keys in a single batch
+    const uniqueMap = new Map()
+    formattedList.forEach((q, idx) => {
+      const qNum = isNaN(q.question_number) || !q.question_number ? idx + 1 : q.question_number
+      q.question_number = qNum
+      uniqueMap.set(qNum, q)
+    })
+    const uniqueList = Array.from(uniqueMap.values())
 
     // 3. Batch insert in chunks of 25 items to handle large question sets safely
     const BATCH_SIZE = 25
     const insertedRecords = []
 
-    for (let i = 0; i < formattedList.length; i += BATCH_SIZE) {
-      const batch = formattedList.slice(i, i + BATCH_SIZE)
+    for (let i = 0; i < uniqueList.length; i += BATCH_SIZE) {
+      const batch = uniqueList.slice(i, i + BATCH_SIZE)
 
       const { data, error } = await supabase
         .from('questions')
@@ -130,6 +154,63 @@ export const questionService = {
     await this.updatePaperTotalQuestions(paperId)
 
     return insertedRecords
+  },
+
+  async saveExtractedDocument(docMetadata) {
+    const { data: { user } } = await supabase.auth.getUser()
+
+    const { data, error } = await supabase
+      .from('documents')
+      .insert([{
+        user_id: user?.id || null,
+        paper_id: docMetadata.paperId || null,
+        file_name: docMetadata.fileName,
+        storage_path: docMetadata.storagePath || null,
+        total_pages: docMetadata.totalPages || 0,
+        processing_status: docMetadata.processingStatus || 'completed',
+        total_questions: docMetadata.totalQuestions || 0,
+        extracted_summary: docMetadata.summaryMetrics || {}
+      }])
+      .select()
+      .single()
+
+    if (error) {
+      console.warn('Document record insert note:', error)
+      return null
+    }
+
+    return data
+  },
+
+  async saveExtractedQuestions(documentId, paperId, extractedQuestions) {
+    if (!extractedQuestions || extractedQuestions.length === 0) return []
+
+    const formattedList = extractedQuestions.map((q) => ({
+      document_id: documentId || null,
+      paper_id: paperId || null,
+      question_number: parseInt(q.question_number, 10),
+      question_text: q.question_text || '',
+      options_json: q.options || [],
+      marked_answer: q.marked_answer || null,
+      marked_option_index: q.marked_option_index ?? null,
+      answer_status: q.answer_status || 'not_marked',
+      confidence: q.confidence ?? 0,
+      page_number: q.page_number ?? 1,
+      extraction_notes: q.extraction_notes || null,
+      manually_edited: q.manually_edited || false,
+      verified: true
+    }))
+
+    const { data, error } = await supabase
+      .from('extracted_questions')
+      .insert(formattedList)
+      .select()
+
+    if (error) {
+      console.warn('Extracted questions record insert note:', error)
+    }
+
+    return data || []
   },
 
   async updatePaperTotalQuestions(paperId) {

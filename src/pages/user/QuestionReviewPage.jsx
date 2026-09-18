@@ -28,7 +28,8 @@ export function QuestionReviewPage() {
         }
 
         const map = {}
-        (details?.answers || []).forEach((a) => {
+        const answersList = details?.answers || []
+        answersList.forEach((a) => {
           map[a.question_id] = a.selected_option
         })
         setUserAnswersMap(map)

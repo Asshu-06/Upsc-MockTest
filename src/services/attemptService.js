@@ -16,34 +16,58 @@ export const attemptService = {
       return activeAttempts[0]
     }
 
-    // 2. Determine next attempt number
-    const { data: allUserPaperAttempts } = await supabase
-      .from('attempts')
-      .select('attempt_number')
-      .eq('user_id', userId)
-      .eq('paper_id', paperId)
-      .order('attempt_number', { ascending: false })
-      .limit(1)
+    // 2. Determine next attempt number and insert with concurrency conflict retry
+    for (let retry = 0; retry < 3; retry++) {
+      const { data: allUserPaperAttempts } = await supabase
+        .from('attempts')
+        .select('attempt_number')
+        .eq('user_id', userId)
+        .eq('paper_id', paperId)
+        .order('attempt_number', { ascending: false })
+        .limit(1)
 
-    const nextAttemptNumber = (allUserPaperAttempts && allUserPaperAttempts.length > 0)
-      ? allUserPaperAttempts[0].attempt_number + 1
-      : 1
+      const nextAttemptNumber = (allUserPaperAttempts && allUserPaperAttempts.length > 0)
+        ? allUserPaperAttempts[0].attempt_number + 1
+        : 1
 
-    // 3. Create new attempt record
-    const { data: newAttempt, error } = await supabase
-      .from('attempts')
-      .insert([{
-        user_id: userId,
-        paper_id: paperId,
-        attempt_number: nextAttemptNumber,
-        status: 'in_progress',
-        started_at: new Date().toISOString()
-      }])
-      .select()
-      .single()
+      const { data: newAttempt, error } = await supabase
+        .from('attempts')
+        .insert([{
+          user_id: userId,
+          paper_id: paperId,
+          attempt_number: nextAttemptNumber,
+          status: 'in_progress',
+          started_at: new Date().toISOString()
+        }])
+        .select()
+        .single()
 
-    if (error) throw error
-    return newAttempt
+      if (!error) return newAttempt
+
+      // Check if error is unique constraint collision (concurrency / double click)
+      const isConflict = error.code === '23505' ||
+        error.message?.includes('unique_user_paper_attempt') ||
+        error.message?.includes('duplicate key')
+
+      if (isConflict) {
+        // Re-check if an attempt was just created concurrently
+        const { data: recheckActive } = await supabase
+          .from('attempts')
+          .select('*')
+          .eq('user_id', userId)
+          .eq('paper_id', paperId)
+          .order('started_at', { ascending: false })
+          .limit(1)
+
+        if (recheckActive && recheckActive.length > 0) {
+          return recheckActive[0]
+        }
+      } else {
+        throw error
+      }
+    }
+
+    throw new Error('Failed to start paper attempt due to a temporary conflict. Please try again.')
   },
 
   async saveAnswer(attemptId, questionId, selectedOption) {
