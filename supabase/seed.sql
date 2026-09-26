@@ -160,3 +160,8 @@ UPDATE public.profiles
 SET role = 'admin'
 WHERE LOWER(email) = 'aswaniadduri11@gmail.com';
 
+-- Grant Admin Role to tonygokul30@gmail.com
+UPDATE public.profiles
+SET role = 'admin'
+WHERE LOWER(email) = 'tonygokul30@gmail.com';
+

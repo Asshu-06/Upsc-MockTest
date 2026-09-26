@@ -37,6 +37,14 @@ export interface ExtractionResponsePayload {
   warnings?: string[];
 }
 
+const GEMINI_MODEL_FALLBACKS = [
+  "gemini-3.6-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+];
+
 const SYSTEM_INSTRUCTION = `You are a highly accurate document extraction engine.
 
 Your task is to extract multiple-choice questions from the supplied question paper.
@@ -284,48 +292,80 @@ serve(async (req: any) => {
       text: `Analyze page ${pageNumber} visually. Detect all multiple-choice questions, option letters/text, and identify any visibly marked/ticked/circled/highlighted answers. Return structured JSON strictly adhering to the schema.`,
     });
 
-    // Call Gemini API server-side using gemini-2.5-flash model endpoint
-    const modelName = "gemini-2.5-flash";
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+    // Try the currently supported Gemini model(s) in order, since Google retires older models for new users.
+    let geminiData: any = null;
+    let lastModelError = "";
 
-    const geminiRes = await fetch(geminiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": geminiApiKey,
-      },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: "application/json",
-        },
-      }),
-    });
+    for (const modelName of GEMINI_MODEL_FALLBACKS) {
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      console.error("Gemini API server error:", errText);
-
-      let safeErrorMessage = errText;
       try {
-        const parsedJson = JSON.parse(errText);
-        safeErrorMessage = parsedJson.error?.message || errText;
-      } catch (e) {}
+        const geminiRes = await fetch(geminiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": geminiApiKey,
+          },
+          body: JSON.stringify({
+            contents: [{ parts }],
+            generationConfig: {
+              temperature: 0.1,
+            },
+          }),
+        });
 
+        const errText = await geminiRes.text();
+
+        if (geminiRes.ok) {
+          geminiData = JSON.parse(errText || "{}");
+          break;
+        }
+
+        let safeErrorMessage = errText;
+        try {
+          const parsedJson = JSON.parse(errText);
+          safeErrorMessage = parsedJson.error?.message || errText;
+        } catch (e) {}
+
+        const isModelUnavailable = 
+          geminiRes.status === 404 || 
+          (geminiRes.status === 400 && /not available|not found|model.*deprecated|is no longer available|no longer supported/i.test(safeErrorMessage)) ||
+          /not available|not found|model.*deprecated|is no longer available|no longer supported/i.test(safeErrorMessage);
+        if (isModelUnavailable) {
+          console.warn(`Gemini model ${modelName} unavailable, falling back to next option:`, safeErrorMessage);
+          lastModelError = safeErrorMessage;
+          continue;
+        }
+
+        return new Response(
+          JSON.stringify({
+            error: "Gemini API request failed",
+            details: safeErrorMessage,
+          }),
+          {
+            status: geminiRes.status >= 500 ? 502 : geminiRes.status,
+            headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+          }
+        );
+      } catch (error: any) {
+        lastModelError = error?.message || String(error);
+        console.error(`Gemini model ${modelName} request failed:`, lastModelError);
+      }
+    }
+
+    if (!geminiData) {
       return new Response(
         JSON.stringify({
           error: "Gemini API request failed",
-          details: safeErrorMessage,
+          details: lastModelError || "No supported Gemini model could be reached.",
         }),
         {
-          status: geminiRes.status >= 500 ? 502 : geminiRes.status,
+          status: 502,
           headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
         }
       );
     }
 
-    const geminiData = await geminiRes.json();
     const rawContent = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!rawContent) {

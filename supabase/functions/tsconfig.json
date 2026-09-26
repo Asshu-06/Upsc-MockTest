@@ -2,7 +2,8 @@
   "compilerOptions": {
     "allowJs": true,
     "lib": ["esnext", "dom"],
-    "moduleResolution": "bundler",
+    "module": "esnext",
+    "moduleResolution": "node",
     "strict": false,
     "noImplicitAny": false,
     "skipLibCheck": true,
