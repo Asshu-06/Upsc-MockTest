@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react'
 import { paperService } from '../../services/paperService'
 import { PaperCard } from '../../components/PaperCard'
 import { Search, Filter, Loader2, BookOpen } from 'lucide-react'
+import { useApp } from '../../contexts/AppContext'
 
 export function PaperListPage() {
+  const { selectedExam } = useApp()
   const [papers, setPapers] = useState([])
   const [loading, setLoading] = useState(true)
 
@@ -22,7 +24,8 @@ export function PaperListPage() {
           year: yearFilter,
           examType: examTypeFilter,
           subject: subjectFilter,
-          sort: sortOrder
+          sort: sortOrder,
+          examName: selectedExam,
         })
         setPapers(data || [])
       } catch (err) {
@@ -34,7 +37,7 @@ export function PaperListPage() {
 
     const timer = setTimeout(loadPapers, 250)
     return () => clearTimeout(timer)
-  }, [search, yearFilter, examTypeFilter, subjectFilter, sortOrder])
+  }, [search, yearFilter, examTypeFilter, subjectFilter, sortOrder, selectedExam])
 
   return (
     <div className="space-y-6">

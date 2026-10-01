@@ -19,6 +19,10 @@ export const paperService = {
     if (filters.subject && filters.subject !== 'all') {
       query = query.eq('subject', filters.subject)
     }
+    // Filter by exam name (used by Mock Tests, PYQ pages)
+    if (filters.examName) {
+      query = query.eq('exam_name', filters.examName)
+    }
 
     if (filters.sort === 'year_asc') {
       query = query.order('year', { ascending: true })

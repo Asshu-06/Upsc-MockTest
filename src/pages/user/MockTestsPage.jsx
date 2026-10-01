@@ -16,12 +16,15 @@ export function MockTestsPage() {
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(null)
 
-  useEffect(() => { loadPapers() }, [])
+  useEffect(() => { loadPapers() }, [selectedExam])
 
   async function loadPapers() {
     setLoading(true)
     try {
-      const data = await paperService.getPublishedPapers({ sort: 'year_desc' })
+      const data = await paperService.getPublishedPapers({
+        sort: 'year_desc',
+        examName: selectedExam,
+      })
       setPapers(data)
     } catch (err) { toast.error(err.message) }
     finally { setLoading(false) }
@@ -62,8 +65,8 @@ export function MockTestsPage() {
       ) : papers.length === 0 ? (
         <div className="text-center py-16 bg-white rounded-2xl border border-surface-border">
           <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-sm text-body-secondary font-semibold">No published papers yet</p>
-          <p className="text-xs text-body-secondary mt-1">Admin needs to publish papers for mock tests.</p>
+          <p className="text-sm text-body-secondary font-semibold">No papers for {selectedExam} yet</p>
+          <p className="text-xs text-body-secondary mt-1">Admin needs to publish papers with exam name "{selectedExam}".</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">

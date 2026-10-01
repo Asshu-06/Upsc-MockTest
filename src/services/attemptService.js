@@ -188,6 +188,28 @@ export const attemptService = {
     return data || []
   },
 
+  async getUserAttemptsByExam(userId, examName) {
+    // If no exam filter, return all
+    if (!examName) return this.getUserAttempts(userId)
+
+    const { data, error } = await supabase
+      .from('attempts')
+      .select(`
+        *,
+        papers!inner (title, exam_name, year, subject)
+      `)
+      .eq('user_id', userId)
+      .eq('papers.exam_name', examName)
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      // Fallback: fetch all and filter client-side if inner join fails
+      const all = await this.getUserAttempts(userId)
+      return all.filter(a => a.papers?.exam_name === examName)
+    }
+    return data || []
+  },
+
   async compareLatestWithPreviousAttempt(userId, paperId, currentAttemptId = null) {
     let query = supabase
       .from('attempts')

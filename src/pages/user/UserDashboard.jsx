@@ -33,7 +33,7 @@ export function UserDashboard() {
   useEffect(() => {
     if (!user?.id) return
     loadAll()
-  }, [user?.id])
+  }, [user?.id, selectedExam])
 
   async function loadAll() {
     setLoading(true)
@@ -42,7 +42,7 @@ export function UserDashboard() {
         streakRes, attemptsRes, affairsRes, notifsRes, notesRes, sessionRes,
       ] = await Promise.allSettled([
         supabase.from('user_streaks').select('*').eq('user_id', user.id).maybeSingle(),
-        attemptService.getUserAttempts(user.id),
+        attemptService.getUserAttemptsByExam(user.id, selectedExam),
         supabase.from('current_affairs').select('id,title,category,published_at,read_time')
           .eq('is_active', true).order('published_at', { ascending: false }).limit(4),
         supabase.from('government_notifications').select('id,title,department,status,application_end')
@@ -50,7 +50,8 @@ export function UserDashboard() {
         supabase.from('user_notes').select('*').eq('user_id', user.id)
           .eq('is_pinned', true).order('updated_at', { ascending: false }).limit(3),
         supabase.from('exam_sessions').select('*').eq('user_id', user.id)
-          .eq('status', 'active').order('last_saved_at', { ascending: false }).limit(1),
+          .eq('status', 'active').eq('exam_context', selectedExam)
+          .order('last_saved_at', { ascending: false }).limit(1),
       ])
 
       if (streakRes.status === 'fulfilled') setStreak(streakRes.value.data)

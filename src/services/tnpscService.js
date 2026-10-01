@@ -211,15 +211,37 @@ export const quickRecallService = {
 // ─── Practice Sessions ────────────────────────────────────────────────────────
 export const practiceService = {
   async createSession(userId, config) {
-    // Select eligible questions based on config
+    // Get paper IDs that match the selected exam
+    let paperIds = []
+    if (config.exam_context) {
+      const { data: examPapers } = await supabase
+        .from('papers')
+        .select('id')
+        .eq('status', 'published')
+        .eq('exam_name', config.exam_context)
+
+      paperIds = (examPapers ?? []).map(p => p.id)
+    }
+
+    // Build question query — filter by exam papers if available
     let q = supabase
       .from('questions')
       .select('id, question_text, option_a, option_b, option_c, option_d, correct_option')
       .not('correct_option', 'is', null)
 
+    if (paperIds.length > 0) {
+      q = q.in('paper_id', paperIds)
+    }
+
     const { data: pool, error: poolErr } = await q.limit(200)
     if (poolErr) throw poolErr
-    if (!pool || pool.length === 0) throw new Error('No questions available. Please ask admin to publish papers.')
+    if (!pool || pool.length === 0) {
+      throw new Error(
+        paperIds.length > 0
+          ? `No questions found for ${config.exam_context}. Ask admin to publish papers for this exam.`
+          : 'No questions available. Please ask admin to publish papers.'
+      )
+    }
 
     // Shuffle
     const shuffled = [...pool]
@@ -369,18 +391,23 @@ export const byopService = {
 
 // ─── Analytics ────────────────────────────────────────────────────────────────
 export const analyticsService = {
-  /** Compute analytics from completed attempts. */
-  async getOverview(userId) {
-    const { data: attempts, error } = await supabase
+  /** Compute analytics from completed attempts, optionally filtered by exam. */
+  async getOverview(userId, examName = null) {
+    let q = supabase
       .from('attempts')
       .select('*, papers(title, subject, exam_name), attempt_answers(*, questions(question_text, correct_option))')
       .eq('user_id', userId)
       .eq('status', 'completed')
       .order('submitted_at', { ascending: false })
       .limit(50)
+
+    const { data: attempts, error } = await q
     if (error) throw error
 
-    const list = attempts ?? []
+    // Filter client-side by exam name so we don't lose the joined data
+    const list = (attempts ?? []).filter(a =>
+      !examName || a.papers?.exam_name === examName
+    )
 
     if (list.length === 0) return { hasData: false }
 

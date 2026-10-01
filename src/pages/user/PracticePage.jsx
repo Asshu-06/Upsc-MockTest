@@ -10,14 +10,23 @@ import { practiceService } from '../../services/tnpscService'
 import { formatTimeRemaining } from '../../lib/utils'
 import { useCountdown } from '../../hooks/useCountdown'
 
-const SUBJECTS   = ['All Subjects', 'History', 'Polity', 'Geography', 'Economy', 'Science', 'Environment', 'Aptitude']
-const Q_COUNTS   = [10, 25, 50, 100]
+// Subjects per exam — shown in the builder
+const EXAM_SUBJECTS = {
+  'TNPSC Group 4':    ['All Subjects', 'General Studies', 'General Science', 'Aptitude', 'Current Affairs'],
+  'TNPSC Group 2/2A': ['All Subjects', 'General Studies', 'General Science', 'Aptitude', 'Tamil', 'Current Affairs'],
+  'TNPSC Group 1':    ['All Subjects', 'History', 'Polity', 'Geography', 'Economy', 'Science', 'Environment', 'Aptitude', 'Tamil', 'Current Affairs'],
+}
+const DEFAULT_SUBJECTS = ['All Subjects', 'History', 'Polity', 'Geography', 'Economy', 'Science', 'Aptitude']
+
+const Q_COUNTS    = [10, 25, 50, 100]
 const TIMER_MODES = ['strict', 'untimed']
 const DIFFICULTIES = ['adaptive', 'easy', 'moderate', 'hard']
 
 // ─── Practice Builder ─────────────────────────────────────────────────────────
 function PracticeBuilder({ onStart }) {
   const { selectedExam } = useApp()
+  const subjects = EXAM_SUBJECTS[selectedExam] ?? DEFAULT_SUBJECTS
+
   const [config, setConfig] = useState({
     subject: 'All Subjects', question_count: 25,
     timer_mode: 'strict', difficulty: 'adaptive', exam_context: selectedExam,
@@ -26,6 +35,12 @@ function PracticeBuilder({ onStart }) {
   const [error, setError]     = useState(null)
   const { toast } = useApp()
   const { user }  = useAuth()
+
+  // Reset subject and exam_context when selectedExam changes
+  useEffect(() => {
+    setConfig(c => ({ ...c, subject: 'All Subjects', exam_context: selectedExam }))
+    setError(null)
+  }, [selectedExam])
 
   async function handleGenerate() {
     setLoading(true); setError(null)
@@ -54,7 +69,7 @@ function PracticeBuilder({ onStart }) {
         <div>
           <label className="block text-sm font-bold text-body-text mb-2">Target Subject</label>
           <div className="flex flex-wrap gap-2">
-            {SUBJECTS.map(s => (
+            {subjects.map(s => (
               <button key={s} onClick={() => setConfig(c => ({ ...c, subject: s }))}
                 className={`px-3 py-2 rounded-xl text-xs font-semibold transition-colors ${config.subject === s ? 'bg-tnpsc-brand text-white' : 'bg-slate-100 text-body-secondary hover:text-body-text'}`}
               >{s}</button>

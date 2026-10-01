@@ -5,19 +5,21 @@ import {
 } from 'lucide-react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { useAuth } from '../../hooks/useAuth'
+import { useApp } from '../../contexts/AppContext'
 import { analyticsService } from '../../services/tnpscService'
 
 export function AnalyticsPage() {
   const { user } = useAuth()
+  const { selectedExam } = useApp()
   const [data, setData]     = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]   = useState(null)
 
-  useEffect(() => { if (user?.id) load() }, [user?.id])
+  useEffect(() => { if (user?.id) load() }, [user?.id, selectedExam])
 
   async function load() {
     setLoading(true); setError(null)
-    try { setData(await analyticsService.getOverview(user.id)) }
+    try { setData(await analyticsService.getOverview(user.id, selectedExam)) }
     catch (err) { setError(err.message) }
     finally { setLoading(false) }
   }
@@ -34,8 +36,8 @@ export function AnalyticsPage() {
   if (!data?.hasData) return (
     <div className="text-center py-16 bg-white rounded-2xl border border-surface-border">
       <BarChart3 className="w-12 h-12 text-slate-300 mx-auto mb-3" />
-      <h2 className="text-lg font-bold text-body-text mb-2">No data yet</h2>
-      <p className="text-sm text-body-secondary">Complete at least one exam attempt to see your analytics.</p>
+      <h2 className="text-lg font-bold text-body-text mb-2">No data for {selectedExam}</h2>
+      <p className="text-sm text-body-secondary">Complete at least one exam attempt for {selectedExam} to see analytics here.</p>
     </div>
   )
 

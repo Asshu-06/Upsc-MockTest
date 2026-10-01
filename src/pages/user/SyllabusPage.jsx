@@ -5,7 +5,6 @@ import { InteractiveSyllabus } from '../../components/tnpsc/InteractiveSyllabus'
 
 export function SyllabusPage() {
   const { selectedExam } = useApp()
-  // The syllabus page simply renders the full interactive syllabus inline
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center gap-3">
@@ -15,8 +14,8 @@ export function SyllabusPage() {
           <p className="text-xs text-body-secondary">{selectedExam} — track your preparation topic by topic</p>
         </div>
       </div>
-      {/* Render syllabus inline (not as modal) */}
-      <SyllabusInline />
+      {/* key={selectedExam} forces full remount when exam switches */}
+      <SyllabusInline key={selectedExam} />
     </div>
   )
 }
