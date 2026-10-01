@@ -6,17 +6,10 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
+import { supabase } from '../../lib/supabase'
 import { practiceService } from '../../services/tnpscService'
 import { formatTimeRemaining } from '../../lib/utils'
 import { useCountdown } from '../../hooks/useCountdown'
-
-// Subjects per exam — shown in the builder
-const EXAM_SUBJECTS = {
-  'TNPSC Group 4':    ['All Subjects', 'General Studies', 'General Science', 'Aptitude', 'Current Affairs'],
-  'TNPSC Group 2/2A': ['All Subjects', 'General Studies', 'General Science', 'Aptitude', 'Tamil', 'Current Affairs'],
-  'TNPSC Group 1':    ['All Subjects', 'History', 'Polity', 'Geography', 'Economy', 'Science', 'Environment', 'Aptitude', 'Tamil', 'Current Affairs'],
-}
-const DEFAULT_SUBJECTS = ['All Subjects', 'History', 'Polity', 'Geography', 'Economy', 'Science', 'Aptitude']
 
 const Q_COUNTS    = [10, 25, 50, 100]
 const TIMER_MODES = ['strict', 'untimed']
@@ -25,7 +18,11 @@ const DIFFICULTIES = ['adaptive', 'easy', 'moderate', 'hard']
 // ─── Practice Builder ─────────────────────────────────────────────────────────
 function PracticeBuilder({ onStart }) {
   const { selectedExam } = useApp()
-  const subjects = EXAM_SUBJECTS[selectedExam] ?? DEFAULT_SUBJECTS
+  const { toast } = useApp()
+  const { user }  = useAuth()
+
+  const [subjects, setSubjects]   = useState(['All Subjects'])
+  const [subjectsLoading, setSubjectsLoading] = useState(true)
 
   const [config, setConfig] = useState({
     subject: 'All Subjects', question_count: 25,
@@ -33,14 +30,57 @@ function PracticeBuilder({ onStart }) {
   })
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
-  const { toast } = useApp()
-  const { user }  = useAuth()
 
-  // Reset subject and exam_context when selectedExam changes
+  // Fetch subjects from syllabus_units for the selected exam
   useEffect(() => {
     setConfig(c => ({ ...c, subject: 'All Subjects', exam_context: selectedExam }))
     setError(null)
+    loadSubjects()
   }, [selectedExam])
+
+  async function loadSubjects() {
+    setSubjectsLoading(true)
+    try {
+      // Get exam ID first
+      const { data: examRow } = await supabase
+        .from('syllabus_exams')
+        .select('id')
+        .eq('exam_name', selectedExam)
+        .maybeSingle()
+
+      if (examRow?.id) {
+        const { data: units } = await supabase
+          .from('syllabus_units')
+          .select('unit_name, subject')
+          .eq('exam_id', examRow.id)
+          .order('unit_number')
+
+        if (units && units.length > 0) {
+          // Build unique subject list from unit names
+          const names = ['All Subjects', ...new Set(units.map(u => u.subject || u.unit_name).filter(Boolean))]
+          setSubjects(names)
+          return
+        }
+      }
+      // No syllabus data — fall back to subjects derived from published papers
+      const { data: papers } = await supabase
+        .from('papers')
+        .select('subject')
+        .eq('status', 'published')
+        .eq('exam_name', selectedExam)
+      
+      if (papers && papers.length > 0) {
+        const names = ['All Subjects', ...new Set(papers.map(p => p.subject).filter(Boolean))]
+        setSubjects(names)
+      } else {
+        setSubjects(['All Subjects'])
+      }
+    } catch {
+      setSubjects(['All Subjects'])
+    } finally {
+      setSubjectsLoading(false)
+    }
+  }
 
   async function handleGenerate() {
     setLoading(true); setError(null)
@@ -68,13 +108,20 @@ function PracticeBuilder({ onStart }) {
         {/* Subject */}
         <div>
           <label className="block text-sm font-bold text-body-text mb-2">Target Subject</label>
-          <div className="flex flex-wrap gap-2">
-            {subjects.map(s => (
-              <button key={s} onClick={() => setConfig(c => ({ ...c, subject: s }))}
-                className={`px-3 py-2 rounded-xl text-xs font-semibold transition-colors ${config.subject === s ? 'bg-tnpsc-brand text-white' : 'bg-slate-100 text-body-secondary hover:text-body-text'}`}
-              >{s}</button>
-            ))}
-          </div>
+          {subjectsLoading ? (
+            <div className="flex items-center gap-2 text-xs text-body-secondary">
+              <Loader2 className="w-4 h-4 animate-spin text-tnpsc-brand" />
+              Loading subjects…
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {subjects.map(s => (
+                <button key={s} onClick={() => setConfig(c => ({ ...c, subject: s }))}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold transition-colors ${config.subject === s ? 'bg-tnpsc-brand text-white' : 'bg-slate-100 text-body-secondary hover:text-body-text'}`}
+                >{s}</button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Question count */}
