@@ -1,3 +1,19 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⚠️  OBSOLETE — NO LONGER USED
+// ═══════════════════════════════════════════════════════════════════════════════
+// This Edge Function has been replaced by client-side PDF.js extraction.
+// 
+// MIGRATION COMPLETED: All PDF extraction now uses:
+//   - src/services/pdfTextExtractor.js (PDF.js text extraction)
+//   - src/services/pdfMcqParser.js (deterministic MCQ parser)
+//
+// This file is retained for reference only and is NOT deployed or called.
+// The Vision/Gemini PDF extraction pipeline has been completely removed.
+//
+// Date deprecated: 2026-09-20
+// Reason: Migration to local selectable-text PDF parsing (no AI/OCR)
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // @ts-nocheck
 // Supabase Edge Function: extract-pdf-questions
 // Vision-only pipeline — NO OCR text layer

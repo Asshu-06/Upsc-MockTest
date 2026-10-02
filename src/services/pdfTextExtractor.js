@@ -163,7 +163,7 @@ export async function extractPdfText(fileInput, onProgress = null) {
   if (!hasSelectableText) {
     warnings.push(
       'PDF contains minimal or no selectable text. This appears to be a scanned/image PDF. ' +
-      'Please use a selectable-text PDF or try the Vision-based extraction tab.'
+      'Scanned/image-only PDFs are not supported. Please upload a selectable-text PDF.'
     )
   }
 

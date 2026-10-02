@@ -251,7 +251,7 @@ export function TextPdfTab({ paperId, paperTitle, onImportSuccess }) {
       if (!extractResult.hasSelectableText) {
         toast.error(
           'PDF contains no selectable text. This appears to be a scanned PDF. ' +
-          'Please use the "Vision (Gemini)" tab instead.'
+          'Scanned/image-only PDFs are not supported. Please upload a selectable-text PDF.'
         )
         setProcessing(false)
         return

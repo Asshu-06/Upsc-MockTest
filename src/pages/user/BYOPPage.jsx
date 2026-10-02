@@ -9,7 +9,8 @@ import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
 import { supabase } from '../../lib/supabase'
 import { byopService } from '../../services/tnpscService'
-import { processPdfVision, retryFailedPages } from '../../services/pdfVisionService'
+import { extractPdfText } from '../../services/pdfTextExtractor'
+import { parseMcqQuestions } from '../../services/pdfMcqParser'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
 import { formatDate } from '../../lib/utils'
@@ -59,9 +60,9 @@ function BatchProgress({ info }) {
         ))}
       </div>
 
-      {totalBatches > 1 && (
+      {totalPages > 1 && (
         <p className="text-[11px] text-blue-600 text-center">
-          Batch {batchIndex ?? 0} of {totalBatches} — each batch sends 2 pages to Gemini Vision
+          Processing page {currentPage ?? 0} of {totalPages} using local PDF.js parser
         </p>
       )}
     </div>
@@ -347,12 +348,9 @@ export function BYOPPage() {
   // Active processing state — keyed by paper id
   const [activeId, setActiveId]     = useState(null)
   const [progressInfo, setProgress] = useState(null)
-  const [result, setResult]         = useState(null)   // processPdfVision result
+  const [result, setResult]         = useState(null)   // local parser result
   const [showReview, setShowReview] = useState(false)
   const [saving, setSaving]         = useState(false)
-
-  // Store rendered pages for retry (kept in memory during session)
-  const renderedRef = useRef({})  // { paperId: renderedPages[] }
 
   useEffect(() => { if (user?.id) fetchPapers() }, [user?.id])
 
@@ -369,8 +367,8 @@ export function BYOPPage() {
     if (!file) return
     e.target.value = ''
 
-    if (!['application/pdf','image/jpeg','image/png','image/jpg'].includes(file.type)) {
-      toast.error('Only PDF, JPG and PNG files are supported.')
+    if (file.type !== 'application/pdf') {
+      toast.error('Only PDF files are supported.')
       return
     }
 
@@ -414,23 +412,61 @@ export function BYOPPage() {
     try {
       const signedUrl  = await byopService.getSignedUrl(paper.storage_path)
 
-      const visionResult = await processPdfVision(signedUrl, {
-        batchSize:  2,
-        documentId: null,
-        onProgress: (info) => setProgress({ ...info }),
+      // Step 1: Extract text from PDF using PDF.js
+      setProgress({ 
+        stage: 'extracting', 
+        currentPage: 0, 
+        totalPages: 0, 
+        pagesProcessed: 0,
+        questionsFound: 0,
+        statusText: 'Extracting text from PDF...'
       })
 
-      // Store rendered pages for possible retry
-      renderedRef.current[paper.id] = visionResult.renderedPages ?? []
-      setResult(visionResult)
+      const pdfBlob = await fetch(signedUrl).then(r => r.blob())
+      const extractionResult = await extractPdfText(pdfBlob, {
+        onProgress: (current, total) => {
+          setProgress({
+            stage: 'extracting',
+            currentPage: current,
+            totalPages: total,
+            pagesProcessed: current,
+            questionsFound: 0,
+            statusText: `Extracting text from page ${current} of ${total}...`
+          })
+        }
+      })
 
-      const { questions, totalQuestions, failedBatches, hasFailures, batchStatuses } = visionResult
+      // Check if PDF has selectable text
+      if (!extractionResult.pages || extractionResult.pages.length === 0) {
+        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
+      }
 
-      if (totalQuestions === 0) {
+      const hasSelectableText = extractionResult.pages.some(page => 
+        page.text && page.text.trim().length > 50
+      )
+
+      if (!hasSelectableText) {
+        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
+      }
+
+      // Step 2: Parse MCQ questions from extracted text
+      setProgress({ 
+        stage: 'parsing', 
+        currentPage: extractionResult.pages.length,
+        totalPages: extractionResult.pages.length,
+        pagesProcessed: extractionResult.pages.length,
+        questionsFound: 0,
+        statusText: 'Parsing questions from text...'
+      })
+
+      const parseResult = parseMcqQuestions(extractionResult)
+      const questions = parseResult.questions || []
+
+      if (questions.length === 0) {
         await byopService.update(paper.id, user.id, {
           processing_status: 'failed',
-          notes: 'No questions could be extracted. The PDF may be blank or corrupted.',
-          batch_progress_json: batchStatuses,
+          notes: 'No questions could be extracted. The PDF may not contain MCQ questions in a recognizable format.',
+          batch_progress_json: [],
         })
         setPapers(prev => prev.map(p => p.id === paper.id
           ? { ...p, processing_status: 'failed', notes: 'No questions extracted.' }
@@ -440,28 +476,37 @@ export function BYOPPage() {
         return
       }
 
-      // Decide status
-      const newStatus = hasFailures ? 'review_required' : 'extracted'
+      // Store result
+      setResult({
+        questions,
+        totalQuestions: questions.length,
+        totalPages: extractionResult.pages.length,
+        processedPages: extractionResult.pages.length,
+      })
+
+      // Determine status based on validation
+      const needsReview = questions.some(q => q.status === 'needs_review')
+      const newStatus = needsReview ? 'review_required' : 'extracted'
 
       await byopService.update(paper.id, user.id, {
         processing_status: newStatus,
-        total_pages:        visionResult.totalPages,
-        processed_pages:    visionResult.processedPages,
-        extracted_count:    totalQuestions,
-        questions_json:     questions.slice(0, 20), // preview
-        batch_progress_json: batchStatuses,
-        notes: hasFailures
-          ? `${totalQuestions} questions extracted. ${failedBatches.length} batch(es) failed — retry to complete.`
-          : `${totalQuestions} questions extracted from ${visionResult.processedPages} pages.`,
+        total_pages: extractionResult.pages.length,
+        processed_pages: extractionResult.pages.length,
+        extracted_count: questions.length,
+        questions_json: questions.slice(0, 20), // preview
+        batch_progress_json: [],
+        notes: needsReview
+          ? `${questions.length} questions extracted. Some questions need review.`
+          : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
       })
 
       setPapers(prev => prev.map(p => p.id === paper.id
-        ? { ...p, processing_status: newStatus, extracted_count: totalQuestions }
+        ? { ...p, processing_status: newStatus, extracted_count: questions.length }
         : p
       ))
 
       setShowReview(true)
-      toast.success(`${totalQuestions} questions extracted!${hasFailures ? ' Some batches failed — you can retry.' : ''}`)
+      toast.success(`${questions.length} questions extracted!${needsReview ? ' Some questions need review.' : ''}`)
 
     } catch (err) {
       const msg = err.message ?? 'Extraction failed'
@@ -474,68 +519,6 @@ export function BYOPPage() {
         : p
       ))
       toast.error('Extraction failed: ' + msg)
-    } finally {
-      setActiveId(null)
-    }
-  }
-
-  // ── Retry failed batches ───────────────────────────────────────────────────
-  async function handleRetryFailed(paper) {
-    if (!result?.failedBatches?.length) {
-      toast.info('No failed batches to retry.')
-      return
-    }
-
-    const stored = renderedRef.current[paper.id] ?? []
-    if (stored.length === 0) {
-      toast.error('Rendered pages no longer in memory. Please re-process the paper.')
-      return
-    }
-
-    // Collect only pages from failed batches
-    const failedPageNums = new Set(result.failedBatches.flatMap(fb => fb.pages ?? []))
-    const pagesToRetry   = stored.filter(p => failedPageNums.has(p.pageNumber) && !p.hasError)
-
-    if (pagesToRetry.length === 0) {
-      toast.error('No retryable pages found.')
-      return
-    }
-
-    setActiveId(paper.id)
-    setProgress({ statusText: `Retrying ${pagesToRetry.length} page(s)…`, stage: 'retrying' })
-
-    try {
-      const retryResult = await retryFailedPages(pagesToRetry, null, info => setProgress({ ...info }))
-      const newQs = retryResult.questions ?? []
-
-      if (newQs.length === 0) {
-        toast.warning('Retry returned no additional questions.')
-        return
-      }
-
-      // Merge into existing result
-      const merged = [...(result.questions ?? []), ...newQs]
-      const seen   = new Set()
-      const deduped = merged.filter(q => {
-        const k = String(q.question_number)
-        if (seen.has(k)) return false
-        seen.add(k); return true
-      }).sort((a, b) => (parseInt(a.question_number) || 0) - (parseInt(b.question_number) || 0))
-
-      setResult(prev => ({ ...prev, questions: deduped, totalQuestions: deduped.length, failedBatches: [] }))
-
-      await byopService.update(paper.id, user.id, {
-        processing_status: 'extracted',
-        extracted_count:   deduped.length,
-        notes:             `${deduped.length} questions after retry.`,
-      })
-      setPapers(prev => prev.map(p => p.id === paper.id
-        ? { ...p, processing_status: 'extracted', extracted_count: deduped.length }
-        : p
-      ))
-      toast.success(`${newQs.length} more questions recovered from retry!`)
-    } catch (err) {
-      toast.error('Retry failed: ' + err.message)
     } finally {
       setActiveId(null)
       setProgress(null)
@@ -620,7 +603,7 @@ export function BYOPPage() {
           <div>
             <h1 className="text-xl font-bold text-body-text">Bring Your Own Paper</h1>
             <p className="text-xs text-body-secondary">
-              Upload PDF or images — Gemini Vision extracts Tamil &amp; English questions automatically
+              Upload selectable-text PDF — local parser extracts questions automatically
             </p>
           </div>
         </div>
@@ -632,18 +615,17 @@ export function BYOPPage() {
           {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
           Upload Paper
         </button>
-        <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={handleFileSelect} />
+        <input ref={fileRef} type="file" accept=".pdf" className="hidden" onChange={handleFileSelect} />
       </div>
 
       {/* Pipeline info banner */}
       <div className="bg-tnpsc-brand-light border border-tnpsc-brand/20 rounded-2xl p-4 flex items-start gap-3">
         <Layers className="w-5 h-5 text-tnpsc-brand shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm font-bold text-tnpsc-brand">Vision-Only Extraction Pipeline</p>
+          <p className="text-sm font-bold text-tnpsc-brand">Local PDF.js Extraction Pipeline</p>
           <p className="text-xs text-body-secondary mt-0.5">
-            Pages are rendered as images and sent directly to Gemini Vision — no OCR text layer.
-            Supports Tamil, English, bilingual questions, tables, and diagrams.
-            Processed in batches of 2 pages. Identical pages are cached to avoid repeat API calls.
+            Uses PDF.js to extract selectable text from PDFs and deterministic parser to identify MCQ questions with tick-mark detection.
+            Supports selectable-text PDFs only. Scanned/image-only PDFs are not supported.
           </p>
         </div>
       </div>
@@ -654,9 +636,8 @@ export function BYOPPage() {
           <div className="flex items-center gap-3">
             <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
             <p className="text-sm font-bold text-blue-800">
-              {progressInfo?.stage === 'rendering'   ? 'Rendering PDF pages…' :
-               progressInfo?.stage === 'extracting'  ? 'Extracting questions via Gemini Vision…' :
-               progressInfo?.stage === 'retrying'    ? 'Retrying failed pages…' :
+              {progressInfo?.stage === 'extracting'  ? 'Extracting text from PDF...' :
+               progressInfo?.stage === 'parsing'     ? 'Parsing MCQ questions...' :
                progressInfo?.stage === 'complete'    ? 'Finalising…' :
                'Starting extraction pipeline…'}
             </p>
@@ -672,9 +653,9 @@ export function BYOPPage() {
       >
         <Upload className="w-10 h-10 text-slate-300 group-hover:text-tnpsc-brand mx-auto mb-3 transition-colors" />
         <p className="text-sm font-semibold text-body-secondary group-hover:text-tnpsc-brand transition-colors">
-          Click to upload PDF, JPG or PNG
+          Click to upload selectable-text PDF
         </p>
-        <p className="text-xs text-body-secondary mt-1">Max 35 MB · Bilingual TNPSC papers supported</p>
+        <p className="text-xs text-body-secondary mt-1">Max 35 MB · Scanned/image-only PDFs not supported</p>
       </div>
 
       {/* Papers list */}
@@ -694,8 +675,6 @@ export function BYOPPage() {
             const Icon = cfg.icon
             const isThis = activeId === paper.id
             const isProcessable = ['uploaded','failed'].includes(paper.processing_status)
-            const hasFailedBatches = result?.hasFailures && activeId === null &&
-              papers.find(p => p.id === paper.id)?.processing_status === 'review_required'
 
             return (
               <div key={paper.id} className="bg-white rounded-2xl border border-surface-border shadow-subtle overflow-hidden">
@@ -751,18 +730,6 @@ export function BYOPPage() {
                         className="px-3 py-1.5 bg-tnpsc-brand-light text-tnpsc-brand text-xs font-bold rounded-lg hover:bg-tnpsc-brand hover:text-white transition-colors"
                       >
                         {showReview ? 'Hide' : 'Review'} Questions
-                      </button>
-                    )}
-
-                    {/* Retry failed batches */}
-                    {paper.processing_status === 'review_required' &&
-                      result?.failedBatches?.length > 0 && activeId === null && (
-                      <button
-                        onClick={() => handleRetryFailed(paper)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 text-amber-800 text-xs font-bold rounded-lg hover:bg-amber-200 transition-colors"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        Retry {result.failedBatches.length} failed batch(es)
                       </button>
                     )}
                   </div>

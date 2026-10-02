@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { questionService } from '../../services/questionService'
-import { PdfAiExtractor } from './PdfAiExtractor'
+// import { PdfAiExtractor } from './PdfAiExtractor' // REMOVED: Vision extraction no longer supported
 import { FileText, CheckCircle2, AlertCircle, AlertTriangle, Loader2, Save, Trash2, Plus, RefreshCw, ChevronDown, ChevronRight, Copy, Eye, ExternalLink, Sparkles } from 'lucide-react'
 
 export function PdfQuestionImporter({
@@ -12,7 +12,7 @@ export function PdfQuestionImporter({
   onRetryExtraction,
   onImportSuccess
 }) {
-  const [activeTab, setActiveTab] = useState('ai_vision') // 'ai_vision' | 'text_parser'
+  const [activeTab, setActiveTab] = useState('text_parser') // Only text_parser supported now (Vision removed)
   const [questions, setQuestions] = useState([])
   const [fileError, setFileError] = useState(null)
   const [importing, setImporting] = useState(false)
@@ -153,8 +153,9 @@ export function PdfQuestionImporter({
 
   return (
     <div id="extraction-results-section" className="space-y-6">
-      {/* MODE SELECTOR TABS */}
+      {/* MODE SELECTOR TABS - Vision tab removed */}
       <div className="flex items-center space-x-2 border-b border-surface-border pb-1">
+        {/* Vision tab removed - only text parser supported now
         <button
           onClick={() => setActiveTab('ai_vision')}
           className={`px-4 py-2 text-xs font-bold rounded-lg flex items-center space-x-2 transition-colors ${
@@ -166,6 +167,7 @@ export function PdfQuestionImporter({
           <Sparkles className="w-4 h-4" />
           <span>Gemini AI Vision OCR (Scanned / Ticked PDFs)</span>
         </button>
+        */}
 
         <button
           onClick={() => setActiveTab('text_parser')}
@@ -176,14 +178,16 @@ export function PdfQuestionImporter({
           }`}
         >
           <FileText className="w-4 h-4" />
-          <span>Fast Text Parser (Digital PDFs)</span>
+          <span>Local PDF Text Parser</span>
         </button>
       </div>
 
-      {/* TAB 1: GEMINI AI VISION OCR EXTRACTOR */}
+      {/* TAB 1: GEMINI AI VISION OCR EXTRACTOR - REMOVED */}
+      {/* Vision extraction no longer supported - deleted geminiOcrService and PdfAiExtractor
       {activeTab === 'ai_vision' && (
         <PdfAiExtractor paperId={paperId} onImportSuccess={onImportSuccess} />
       )}
+      */}
 
       {/* TAB 2: FAST TEXT PARSER PREVIEW */}
       {activeTab === 'text_parser' && (
