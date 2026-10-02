@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileText, Loader2, CheckCircle2, XCircle, AlertCircle,
   RefreshCw, Eye, Trash2, Plus, Clock, ChevronDown, ChevronRight,
-  Layers, Zap, BookOpen, AlertTriangle, RotateCcw, X, Save,
+  Layers, Zap, BookOpen, AlertTriangle, RotateCcw, X, Save, Play,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
@@ -675,6 +676,24 @@ export function BYOPPage() {
                         {paper.processing_status === 'failed' ? 'Retry' : 'Process'}
                       </button>
                     )}
+
+                    {/* Attempt Test — only for READY papers that have a linked paper ID */}
+                    {paper.processing_status === 'ready' && (() => {
+                      const match = paper.notes?.match(/Paper created:\s*([a-f0-9-]{36})/i)
+                      const linkedPaperId = match?.[1]
+                      if (!linkedPaperId) return null
+                      return (
+                        <button
+                          onClick={() => navigate(`/exam/${linkedPaperId}`)}
+                          className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors shadow-subtle"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
+                          </svg>
+                          Attempt Test
+                        </button>
+                      )
+                    })()}
 
                     {/* View extracted questions */}
                     {['extracted','review_required'].includes(paper.processing_status) &&
