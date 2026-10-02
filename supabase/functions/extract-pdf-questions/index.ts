@@ -22,11 +22,10 @@ const CORS_HEADERS = {
 function getModelFallbacks(): string[] {
   const envModel = Deno.env.get("GEMINI_MODEL");
   const defaults = [
+    "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
   ];
   if (envModel && !defaults.includes(envModel)) {
     return [envModel, ...defaults];
