@@ -42,7 +42,7 @@ const JPEG_QUALITY = 0.82
 const MAX_PX = 2400
 
 /** Pause between batches (ms) to stay within Gemini free-tier RPM limits. */
-const INTER_BATCH_DELAY_MS = 2500
+const INTER_BATCH_DELAY_MS = 800
 
 // ─── PDF.js worker setup (done once) ──────────────────────────────────────────
 let workerConfigured = false
@@ -422,7 +422,7 @@ export async function processPdfVision(fileInput, options = {}) {
       error:          batchError,
     })
 
-    // Inter-batch delay (skip after last batch)
+    // Inter-batch delay — skip if all pages in this batch were cached
     if (bi < totalBatches - 1 && needsProcessing.length > 0) {
       await new Promise(r => setTimeout(r, INTER_BATCH_DELAY_MS))
     }
