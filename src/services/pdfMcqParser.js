@@ -109,12 +109,22 @@ function removeTickMarks(text) {
 export async function parseMcqQuestions(extractionResult, onProgress = null) {
   const { pages, fileName, totalPages } = extractionResult
 
+  // Debug: Log what we received
+  console.log('[pdfMcqParser] Extraction result:', {
+    fileName,
+    totalPages,
+    pageCount: pages?.length,
+    firstPageItems: pages?.[0]?.items?.length,
+  })
+
   const allQuestions = []
   const warnings = []
   let currentQuestion = null
 
   for (const pageData of pages) {
     const { pageNumber, items } = pageData
+
+    console.log(`[pdfMcqParser] Processing page ${pageNumber}, items: ${items?.length}`)
 
     if (onProgress) {
       try {
@@ -126,9 +136,16 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
 
     // Group items into lines
     const lines = groupItemsByLine(items)
+    
+    console.log(`[pdfMcqParser] Page ${pageNumber}: grouped into ${lines.length} lines`)
 
     for (const lineItems of lines) {
       const lineText = reconstructLineText(lineItems)
+      
+      // Debug: Log first few lines
+      if (lines.indexOf(lineItems) < 5) {
+        console.log(`[pdfMcqParser] Line ${lines.indexOf(lineItems)}: "${lineText}"`)
+      }
 
       // Skip empty or ignored lines
       if (shouldIgnoreLine(lineText)) continue
@@ -136,6 +153,8 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
       // Check for question number
       const questionMatch = detectQuestionNumber(lineText)
       if (questionMatch) {
+        console.log(`[pdfMcqParser] Found question ${questionMatch.number}`)
+        
         // Save previous question if exists
         if (currentQuestion) {
           allQuestions.push(finalizeQuestion(currentQuestion, warnings))
@@ -159,6 +178,8 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
       const optionMatch = detectOptionLabel(lineText)
       if (optionMatch && currentQuestion) {
         const { label, remainder } = optionMatch
+
+        console.log(`[pdfMcqParser] Found option ${label}: "${remainder}"`)
 
         // Check for tick mark
         const hasTick = detectTickMark(lineText)

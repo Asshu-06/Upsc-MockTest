@@ -423,22 +423,30 @@ export function BYOPPage() {
       })
 
       const pdfBlob = await fetch(signedUrl).then(r => r.blob())
-      const extractionResult = await extractPdfText(pdfBlob, {
-        onProgress: (current, total) => {
-          setProgress({
-            stage: 'extracting',
-            currentPage: current,
-            totalPages: total,
-            pagesProcessed: current,
-            questionsFound: 0,
-            statusText: `Extracting text from page ${current} of ${total}...`
-          })
-        }
-      })
+      
+      let extractionResult
+      try {
+        extractionResult = await extractPdfText(pdfBlob, {
+          onProgress: (current, total) => {
+            setProgress({
+              stage: 'extracting',
+              currentPage: current,
+              totalPages: total,
+              pagesProcessed: current,
+              questionsFound: 0,
+              statusText: `Extracting text from page ${current} of ${total}...`
+            })
+          }
+        })
+      } catch (err) {
+        // Show real PDF.js error instead of generic message
+        const errorMsg = err.message || 'Unknown PDF extraction error'
+        throw new Error(`PDF text extraction failed: ${errorMsg}`)
+      }
 
       // Check if PDF has selectable text
       if (!extractionResult.pages || extractionResult.pages.length === 0) {
-        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
+        throw new Error('PDF contains no pages or failed to extract page data.')
       }
 
       // Check if any page has text items with content

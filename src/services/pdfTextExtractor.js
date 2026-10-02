@@ -119,14 +119,17 @@ export async function extractPdfText(fileInput, onProgress = null) {
   try {
     pdfDoc = await pdfjsLib.getDocument({
       data: arrayBuffer,
+      // Standard fonts directory - served from public folder
+      standardFontDataUrl: '/pdfjs/standard_fonts/',
       // Don't stop on recoverable errors
       stopAtErrors: false,
-      // Disable font face rendering (we only need text extraction, not rendering)
-      disableFontFace: true,
-      // Ignore font errors - we're only extracting text, not rendering
-      ignoreErrors: true,
+      // Enable font face for proper text extraction
+      disableFontFace: false,
     }).promise
+    
+    console.log(`[PDF.js] Successfully loaded PDF: ${pdfDoc.numPages} pages`)
   } catch (err) {
+    console.error('[PDF.js] Failed to load document:', err)
     throw new Error(`PDF.js failed to load document: ${err.message}`)
   }
 
@@ -166,9 +169,19 @@ export async function extractPdfText(fileInput, onProgress = null) {
     return sum + page.items.reduce((s, item) => s + (item.text || '').length, 0)
   }, 0)
 
+  // Concatenate all text for debugging
+  const allText = pages.map(page => 
+    page.items.map(item => item.text || '').join(' ')
+  ).join('\n')
+
+  console.log(`[PDF.js] Total pages: ${totalPages}`)
+  console.log(`[PDF.js] Total text length: ${totalTextLength} characters`)
+  console.log(`[PDF.js] First 1000 chars:`, allText.slice(0, 1000))
+
   const hasSelectableText = totalTextLength > 100 // At least 100 characters
 
   if (!hasSelectableText) {
+    console.error('[PDF.js] Insufficient text extracted from PDF')
     warnings.push(
       'PDF contains minimal or no selectable text. This appears to be a scanned/image PDF. ' +
       'Scanned/image-only PDFs are not supported. Please upload a selectable-text PDF.'
