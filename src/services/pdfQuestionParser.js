@@ -187,14 +187,14 @@ export const pdfQuestionParser = {
       const bodyText = blockText.replace(/^(?:^|\n)\s*(?:Q(?:uestion)?\.?\s*)?0*\d{1,3}\s*[\.\:\)]\s*/i, '').trim()
       const optionsResult = this.parseOptionsFromBody(bodyText)
 
-      // Debug: log first 5 questions
-      if (qNum <= 5) {
-        console.log(`[Q${qNum}] Body text:`, bodyText.substring(0, 200))
-        console.log(`[Q${qNum}] Question text:`, optionsResult.questionText?.substring(0, 100))
-        console.log(`[Q${qNum}] Option A:`, optionsResult.option_a?.substring(0, 50))
-        console.log(`[Q${qNum}] Option B:`, optionsResult.option_b?.substring(0, 50))
-        console.log(`[Q${qNum}] Option C:`, optionsResult.option_c?.substring(0, 50))
-        console.log(`[Q${qNum}] Option D:`, optionsResult.option_d?.substring(0, 50))
+      // Debug: log questions 101-105 (TNPSC format starts at 101)
+      if (qNum >= 101 && qNum <= 105) {
+        console.log(`[Q${qNum}] Body text:`, bodyText.substring(0, 300))
+        console.log(`[Q${qNum}] Question text:`, optionsResult.questionText?.substring(0, 150))
+        console.log(`[Q${qNum}] Option A:`, optionsResult.option_a?.substring(0, 100))
+        console.log(`[Q${qNum}] Option B:`, optionsResult.option_b?.substring(0, 100))
+        console.log(`[Q${qNum}] Option C:`, optionsResult.option_c?.substring(0, 100))
+        console.log(`[Q${qNum}] Option D:`, optionsResult.option_d?.substring(0, 100))
       }
 
       const errors = []
