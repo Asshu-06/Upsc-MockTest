@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
+import { supabase } from '../../lib/supabase'
 import { byopService } from '../../services/tnpscService'
 import { processPdfVision, retryFailedPages } from '../../services/pdfVisionService'
 import { questionService } from '../../services/questionService'
@@ -270,6 +271,67 @@ function QuestionsPanel({ questions, onSave, saving }) {
         })}
       </div>
     </div>
+  )
+}
+
+// ─── Attempt button: looks up the paper created from this upload ──────────────
+function AttemptButton({ paperId, userId, navigate }) {
+  const [loading, setLoading] = useState(false)
+  const { toast } = useApp()
+
+  async function handleAttempt() {
+    setLoading(true)
+    try {
+      // Find the paper created by this user's BYOP upload.
+      // The notes field stores the linked paper ID as: '... paper "uuid".'
+      const { data: record } = await supabase
+        .from('uploaded_papers')
+        .select('notes, title')
+        .eq('id', paperId)
+        .maybeSingle()
+
+      // Try regex from notes first
+      const match = record?.notes?.match(/"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/)
+      if (match?.[1]) {
+        navigate(`/exam/${match[1]}`)
+        return
+      }
+
+      // Fallback: find the draft paper by title + created_by
+      const { data: papers } = await supabase
+        .from('papers')
+        .select('id')
+        .eq('created_by', userId)
+        .ilike('title', `%${record?.title ?? ''}%`)
+        .eq('exam_name', 'Custom Upload')
+        .order('created_at', { ascending: false })
+        .limit(1)
+
+      if (papers?.[0]?.id) {
+        navigate(`/exam/${papers[0].id}`)
+        return
+      }
+
+      toast.error('Could not find the linked paper. Try navigating to Papers list.')
+    } catch (err) {
+      toast.error('Error: ' + err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <button
+      onClick={handleAttempt}
+      disabled={loading}
+      className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors shadow-subtle disabled:opacity-60"
+    >
+      {loading
+        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        : <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
+      }
+      Attempt Test
+    </button>
   )
 }
 
@@ -677,23 +739,10 @@ export function BYOPPage() {
                       </button>
                     )}
 
-                    {/* Attempt Test — only for READY papers that have a linked paper ID */}
-                    {paper.processing_status === 'ready' && (() => {
-                      const match = paper.notes?.match(/Paper created:\s*([a-f0-9-]{36})/i)
-                      const linkedPaperId = match?.[1]
-                      if (!linkedPaperId) return null
-                      return (
-                        <button
-                          onClick={() => navigate(`/exam/${linkedPaperId}`)}
-                          className="flex items-center gap-1.5 px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-colors shadow-subtle"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
-                            <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/>
-                          </svg>
-                          Attempt Test
-                        </button>
-                      )
-                    })()}
+                    {/* Attempt Test — for READY papers */}
+                    {paper.processing_status === 'ready' && (
+                      <AttemptButton paperId={paper.id} userId={user.id} navigate={navigate} />
+                    )}
 
                     {/* View extracted questions */}
                     {['extracted','review_required'].includes(paper.processing_status) &&
