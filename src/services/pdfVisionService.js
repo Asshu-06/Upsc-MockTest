@@ -182,7 +182,7 @@ async function callEdgeFunction(pages) {
 // shape into the flat {question_text, option_a…d, correct_option} shape
 // that the existing questions table expects, while preserving the richer
 // bilingual fields as extra keys for the review UI.
-export function normaliseTnpscQuestion(q, fallbackPage) {
+export function normaliseTnpscQuestion(q, fallbackPage, idx = 0) {
   // Build a single combined question_text for storage in the questions table
   const parts = []
   if (q.tamil_question)   parts.push(q.tamil_question)
@@ -205,7 +205,7 @@ export function normaliseTnpscQuestion(q, fallbackPage) {
 
   return {
     // ── fields for questions table (flat schema) ──
-    question_number:  parseInt(String(q.question_number), 10) || 0,
+    question_number:  parseInt(String(q.question_number), 10) || (fallbackPage * 1000 + idx),
     question_text:    questionText,
     option_a:         optA,
     option_b:         optB,
@@ -353,10 +353,16 @@ export async function processPdfVision(fileInput, options = {}) {
       if (!forceReprocess && rp.hash) {
         const cached = await lookupCache(rp.hash)
         if (cached) {
-          cachedPages++
-          const cacheQs = (cached.questions_json ?? []).map(q => normaliseTnpscQuestion(q, rp.pageNumber))
-          batchQsFromCache.push(...cacheQs)
-          continue
+          // Only use cache if it actually has questions OR was a confirmed blank page
+          // Empty cache entries from previously failed batches must be re-processed
+          const cachedQs = cached.questions_json ?? []
+          if (cachedQs.length > 0) {
+            cachedPages++
+            const cacheNorm = cachedQs.map((q, i) => normaliseTnpscQuestion(q, rp.pageNumber, i))
+            batchQsFromCache.push(...cacheNorm)
+            continue
+          }
+          // Empty cache entry — treat as needs reprocessing (previous failure)
         }
       }
 
@@ -379,7 +385,7 @@ export async function processPdfVision(fileInput, options = {}) {
         for (const pageResult of result.pages ?? []) {
           const pn        = pageResult.page_number
           const rawQs     = pageResult.questions ?? []
-          const normQs    = rawQs.map(q => normaliseTnpscQuestion(q, pn))
+          const normQs    = rawQs.map((q, i) => normaliseTnpscQuestion(q, pn, i))
           allQuestions.push(...normQs)
 
           // Write to cache
@@ -427,13 +433,18 @@ export async function processPdfVision(fileInput, options = {}) {
   const seen    = new Set()
   const deduped = []
   for (const q of allQuestions) {
-    const key = String(q.question_number).trim()
+    const num = parseInt(String(q.question_number), 10)
+    // Use page+fallback-index for zero/unparseable question numbers to avoid collapse
+    const key = (!isNaN(num) && num > 0)
+      ? String(num)
+      : `p${q.source_page ?? q.page_number}_${deduped.length}`
+
     if (!seen.has(key)) {
       seen.add(key)
       deduped.push(q)
     } else {
       // Keep the version with better extraction_status
-      const existing = deduped.find(e => String(e.question_number).trim() === key)
+      const existing = deduped.find(e => String(e.question_number).trim() === String(q.question_number).trim())
       if (existing && q.extraction_status === 'complete' && existing.extraction_status !== 'complete') {
         Object.assign(existing, q)
       }
@@ -522,7 +533,7 @@ export async function retryFailedPages(pagesToRetry, documentId, onProgress) {
   for (const pageResult of result.pages ?? []) {
     const pn    = pageResult.page_number
     const rawQs = pageResult.questions ?? []
-    const normQs = rawQs.map(q => normaliseTnpscQuestion(q, pn))
+    const normQs = rawQs.map((q, i) => normaliseTnpscQuestion(q, pn, i))
     questions.push(...normQs)
 
     const rp = validPages.find(p => p.pageNumber === pn)
