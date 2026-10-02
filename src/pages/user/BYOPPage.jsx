@@ -275,29 +275,28 @@ function QuestionsPanel({ questions, onSave, saving }) {
 }
 
 // ─── Attempt button: looks up the paper created from this upload ──────────────
-function AttemptButton({ paperId, userId, navigate }) {
+function AttemptButton({ paperId, userId }) {
   const [loading, setLoading] = useState(false)
   const { toast } = useApp()
+  const navigate = useNavigate()
 
   async function handleAttempt() {
     setLoading(true)
     try {
-      // Find the paper created by this user's BYOP upload.
-      // The notes field stores the linked paper ID as: '... paper "uuid".'
       const { data: record } = await supabase
         .from('uploaded_papers')
         .select('notes, title')
         .eq('id', paperId)
         .maybeSingle()
 
-      // Try regex from notes first
+      // Try regex from notes first: '... paper "uuid".'
       const match = record?.notes?.match(/"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/)
       if (match?.[1]) {
         navigate(`/exam/${match[1]}`)
         return
       }
 
-      // Fallback: find the draft paper by title + created_by
+      // Fallback: find the draft paper by created_by + title
       const { data: papers } = await supabase
         .from('papers')
         .select('id')
@@ -741,7 +740,7 @@ export function BYOPPage() {
 
                     {/* Attempt Test — for READY papers */}
                     {paper.processing_status === 'ready' && (
-                      <AttemptButton paperId={paper.id} userId={user.id} navigate={navigate} />
+                      <AttemptButton paperId={paper.id} userId={user.id} />
                     )}
 
                     {/* View extracted questions */}
