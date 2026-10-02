@@ -1,35 +1,296 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Upload, FileText, Loader2, CheckCircle2, XCircle, AlertCircle,
-  RefreshCw, Eye, Trash2, Plus, Clock,
+  RefreshCw, Eye, Trash2, Plus, Clock, ChevronDown, ChevronRight,
+  Layers, Zap, BookOpen, AlertTriangle, RotateCcw, X, Save,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
 import { byopService } from '../../services/tnpscService'
-import { geminiOcrService } from '../../services/geminiOcrService'
+import { processPdfVision, retryFailedPages } from '../../services/pdfVisionService'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
 import { formatDate } from '../../lib/utils'
 
+// ─── Status config ─────────────────────────────────────────────────────────────
 const STATUS_CONFIG = {
-  uploaded:         { label: 'Uploaded',         color: 'bg-slate-100 text-slate-600',    icon: Upload },
-  processing:       { label: 'Processing…',      color: 'bg-blue-100 text-blue-700',      icon: RefreshCw },
-  extracted:        { label: 'Extracted',         color: 'bg-yellow-100 text-yellow-700',  icon: Eye },
-  review_required:  { label: 'Review Required',   color: 'bg-orange-100 text-orange-700',  icon: AlertCircle },
-  ready:            { label: 'Ready',             color: 'bg-green-100 text-green-700',    icon: CheckCircle2 },
-  failed:           { label: 'Failed',            color: 'bg-red-100 text-red-700',        icon: XCircle },
+  uploaded:        { label: 'Uploaded',        color: 'bg-slate-100 text-slate-600',    icon: Upload },
+  processing:      { label: 'Processing…',     color: 'bg-blue-100 text-blue-700',      icon: RefreshCw },
+  extracted:       { label: 'Extracted',        color: 'bg-yellow-100 text-yellow-700',  icon: Eye },
+  review_required: { label: 'Review Required',  color: 'bg-orange-100 text-orange-700',  icon: AlertCircle },
+  ready:           { label: 'Ready',            color: 'bg-green-100 text-green-700',    icon: CheckCircle2 },
+  failed:          { label: 'Failed',           color: 'bg-red-100 text-red-700',        icon: XCircle },
 }
 
+// ─── Batch progress bar ────────────────────────────────────────────────────────
+function BatchProgress({ info }) {
+  if (!info) return null
+  const { stage, currentPage, totalPages, batchIndex, totalBatches,
+          pagesProcessed, questionsFound, cachedPages, statusText } = info
+
+  const pct = totalPages > 0 ? Math.round((pagesProcessed / totalPages) * 100) : 0
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-semibold text-blue-800">{statusText ?? 'Processing…'}</span>
+        <span className="text-blue-600 font-mono">{pct}%</span>
+      </div>
+
+      <div className="w-full h-2.5 bg-blue-100 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-blue-600 rounded-full transition-all duration-500"
+          style={{ width: `${Math.max(pct, 4)}%` }}
+        />
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 text-center">
+        {[
+          { label: 'Pages',     value: `${pagesProcessed ?? 0} / ${totalPages ?? '?'}` },
+          { label: 'Questions', value: questionsFound ?? 0 },
+          { label: 'Cached',    value: cachedPages ?? 0 },
+        ].map(({ label, value }) => (
+          <div key={label} className="bg-blue-50 rounded-lg py-1.5">
+            <p className="text-sm font-bold text-blue-800">{value}</p>
+            <p className="text-[10px] text-blue-600">{label}</p>
+          </div>
+        ))}
+      </div>
+
+      {totalBatches > 1 && (
+        <p className="text-[11px] text-blue-600 text-center">
+          Batch {batchIndex ?? 0} of {totalBatches} — each batch sends 2 pages to Gemini Vision
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ─── Extracted questions review panel ─────────────────────────────────────────
+function QuestionsPanel({ questions, onSave, saving }) {
+  const [expanded, setExpanded] = useState(new Set())
+  const [editedQs, setEditedQs] = useState(questions)
+
+  // sync when questions prop changes
+  useEffect(() => { setEditedQs(questions) }, [questions])
+
+  function toggleExpand(idx) {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(idx) ? next.delete(idx) : next.add(idx)
+      return next
+    })
+  }
+
+  function editQuestion(idx, field, value) {
+    setEditedQs(prev => prev.map((q, i) => i === idx ? { ...q, [field]: value } : q))
+  }
+
+  const valid   = editedQs.filter(q => q.isValid !== false)
+  const invalid = editedQs.filter(q => q.isValid === false)
+
+  const STATUS_BADGE = {
+    complete:    'bg-emerald-100 text-emerald-700',
+    partial:     'bg-amber-100  text-amber-700',
+    unreadable:  'bg-red-100    text-red-700',
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Summary bar */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-xs font-bold text-body-text">{editedQs.length} questions extracted</span>
+          {invalid.length > 0 && (
+            <span className="text-[11px] bg-amber-100 text-amber-800 rounded-full px-2 py-0.5 font-semibold">
+              {invalid.length} need review
+            </span>
+          )}
+          {editedQs.filter(q => q.has_diagram).length > 0 && (
+            <span className="text-[11px] bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 font-semibold">
+              {editedQs.filter(q => q.has_diagram).length} with diagrams
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => onSave(editedQs)}
+          disabled={saving || editedQs.length === 0}
+          className="flex items-center gap-2 px-4 py-2 bg-tnpsc-brand text-white rounded-xl text-xs font-bold hover:bg-tnpsc-brand-hover transition-colors disabled:opacity-50"
+        >
+          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+          {saving ? 'Saving…' : `Save ${valid.length} Questions`}
+        </button>
+      </div>
+
+      {/* Question cards */}
+      <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
+        {editedQs.map((q, idx) => {
+          const isOpen  = expanded.has(idx)
+          const badgeCls = STATUS_BADGE[q.extraction_status] ?? STATUS_BADGE.complete
+          const qNum    = q.question_number ?? idx + 1
+
+          return (
+            <div
+              key={idx}
+              className={`rounded-xl border transition-colors ${
+                q.isValid === false ? 'border-amber-300 bg-amber-50/30' : 'border-surface-border bg-white'
+              }`}
+            >
+              {/* Card header — always visible */}
+              <button
+                onClick={() => toggleExpand(idx)}
+                className="w-full flex items-center justify-between px-4 py-3 text-left"
+              >
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <span className="w-7 h-7 rounded-lg bg-tnpsc-brand text-white text-xs font-bold flex items-center justify-center shrink-0">
+                    {qNum}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-body-text truncate leading-snug">
+                      {q.tamil_question
+                        ? q.tamil_question.slice(0, 80) + (q.tamil_question.length > 80 ? '…' : '')
+                        : q.question_text?.slice(0, 80) ?? '—'}
+                    </p>
+                    {q.english_question && (
+                      <p className="text-[10px] text-body-secondary truncate mt-0.5">
+                        {q.english_question.slice(0, 80)}{q.english_question.length > 80 ? '…' : ''}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  <span className={`text-[10px] font-bold uppercase rounded-full px-2 py-0.5 ${badgeCls}`}>
+                    {q.extraction_status ?? 'complete'}
+                  </span>
+                  {q.has_diagram && (
+                    <span className="text-[10px] bg-purple-100 text-purple-700 rounded-full px-1.5 py-0.5 font-bold">
+                      diagram
+                    </span>
+                  )}
+                  <span className="text-[10px] text-body-secondary">p.{q.source_page ?? q.page_number}</span>
+                  {isOpen
+                    ? <ChevronDown className="w-4 h-4 text-body-secondary" />
+                    : <ChevronRight className="w-4 h-4 text-body-secondary" />
+                  }
+                </div>
+              </button>
+
+              {/* Expanded edit view */}
+              {isOpen && (
+                <div className="px-4 pb-4 space-y-3 border-t border-surface-border pt-3">
+                  {/* Tamil question */}
+                  <div>
+                    <label className="block text-[10px] font-bold text-body-secondary uppercase mb-1">
+                      Tamil Question
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={q.tamil_question ?? ''}
+                      onChange={e => editQuestion(idx, 'tamil_question', e.target.value)}
+                      className="w-full border border-surface-border rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-tnpsc-brand resize-none"
+                      placeholder="Tamil text…"
+                    />
+                  </div>
+
+                  {/* English question */}
+                  <div>
+                    <label className="block text-[10px] font-bold text-body-secondary uppercase mb-1">
+                      English Question
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={q.english_question ?? ''}
+                      onChange={e => editQuestion(idx, 'english_question', e.target.value)}
+                      className="w-full border border-surface-border rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-tnpsc-brand resize-none"
+                      placeholder="English text…"
+                    />
+                  </div>
+
+                  {/* Options */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {['A','B','C','D'].map(opt => (
+                      <div key={opt}>
+                        <label className="block text-[10px] font-bold text-body-secondary uppercase mb-1">
+                          Option {opt}
+                          {q.correct_option === opt && (
+                            <span className="ml-1 text-emerald-600">✓ Correct</span>
+                          )}
+                        </label>
+                        <input
+                          type="text"
+                          value={q[`option_${opt.toLowerCase()}`] ?? ''}
+                          onChange={e => editQuestion(idx, `option_${opt.toLowerCase()}`, e.target.value)}
+                          className={`w-full border rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-tnpsc-brand ${
+                            q.correct_option === opt
+                              ? 'border-emerald-400 bg-emerald-50'
+                              : 'border-surface-border'
+                          }`}
+                          placeholder={`Option ${opt}…`}
+                        />
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Correct option selector */}
+                  <div className="flex items-center gap-3">
+                    <label className="text-[10px] font-bold text-body-secondary uppercase">
+                      Correct Answer:
+                    </label>
+                    <div className="flex gap-1.5">
+                      {['A','B','C','D',null].map(opt => (
+                        <button
+                          key={String(opt)}
+                          onClick={() => editQuestion(idx, 'correct_option', opt)}
+                          className={`w-7 h-7 rounded-lg text-xs font-bold transition-colors ${
+                            q.correct_option === opt
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-slate-100 text-body-secondary hover:bg-slate-200'
+                          }`}
+                        >
+                          {opt ?? '–'}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-[10px] text-body-secondary">
+                      (– = no answer key visible)
+                    </span>
+                  </div>
+
+                  {/* Type badge */}
+                  <div className="flex items-center gap-2 text-[10px] text-body-secondary">
+                    <span>Type: <strong>{q.question_type ?? 'mcq'}</strong></span>
+                    <span>Page: <strong>{q.source_page ?? q.page_number}</strong></span>
+                    {q.has_diagram && <span className="text-purple-600 font-semibold">⚠ Contains diagram</span>}
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─── Main page ─────────────────────────────────────────────────────────────────
 export function BYOPPage() {
   const { user } = useAuth()
   const { toast } = useApp()
-  const fileRef = useRef(null)
+  const fileRef   = useRef(null)
 
-  const [papers, setPapers]     = useState([])
-  const [loading, setLoading]   = useState(true)
+  const [papers, setPapers]   = useState([])
+  const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
-  const [processing, setProcessing] = useState(null) // paper id being processed
-  const [progress, setProgress] = useState('')
+
+  // Active processing state — keyed by paper id
+  const [activeId, setActiveId]     = useState(null)
+  const [progressInfo, setProgress] = useState(null)
+  const [result, setResult]         = useState(null)   // processPdfVision result
+  const [showReview, setShowReview] = useState(false)
+  const [saving, setSaving]         = useState(false)
+
+  // Store rendered pages for retry (kept in memory during session)
+  const renderedRef = useRef({})  // { paperId: renderedPages[] }
 
   useEffect(() => { if (user?.id) fetchPapers() }, [user?.id])
 
@@ -40,13 +301,13 @@ export function BYOPPage() {
     finally { setLoading(false) }
   }
 
+  // ── Upload ─────────────────────────────────────────────────────────────────
   async function handleFileSelect(e) {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = ''
 
-    const allowed = ['application/pdf', 'image/jpeg', 'image/png', 'image/jpg']
-    if (!allowed.includes(file.type)) {
+    if (!['application/pdf','image/jpeg','image/png','image/jpg'].includes(file.type)) {
       toast.error('Only PDF, JPG and PNG files are supported.')
       return
     }
@@ -54,7 +315,7 @@ export function BYOPPage() {
     setUploading(true)
     try {
       const { path } = await byopService.uploadFile(user.id, file)
-      const record = await byopService.create(user.id, {
+      const record   = await byopService.create(user.id, {
         title:             file.name.replace(/\.[^/.]+$/, ''),
         file_name:         file.name,
         storage_path:      path,
@@ -71,75 +332,239 @@ export function BYOPPage() {
     }
   }
 
+  // ── Process (run full pipeline) ────────────────────────────────────────────
   async function handleProcess(paper) {
-    setProcessing(paper.id)
-    setProgress('Starting AI extraction…')
+    setActiveId(paper.id)
+    setProgress(null)
+    setResult(null)
+    setShowReview(false)
 
-    await byopService.update(paper.id, user.id, { processing_status: 'processing' })
-    setPapers(prev => prev.map(p => p.id === paper.id ? { ...p, processing_status: 'processing' } : p))
+    // Mark processing in DB
+    await byopService.update(paper.id, user.id, {
+      processing_status: 'processing',
+      batch_progress_json: [],
+    })
+    setPapers(prev => prev.map(p => p.id === paper.id
+      ? { ...p, processing_status: 'processing' }
+      : p
+    ))
 
     try {
-      // Get signed URL for the file
-      const signedUrl = await byopService.getSignedUrl(paper.storage_path)
+      const signedUrl  = await byopService.getSignedUrl(paper.storage_path)
 
-      const result = await geminiOcrService.processPdfWithGemini(signedUrl, (msg, cur, total) => {
-        setProgress(`${msg} (${cur}%)`)
+      const visionResult = await processPdfVision(signedUrl, {
+        batchSize:  2,
+        documentId: null,
+        onProgress: (info) => setProgress({ ...info }),
       })
 
-      if (!result.questions || result.questions.length === 0) {
-        throw new Error('No questions could be extracted from this document.')
+      // Store rendered pages for possible retry
+      renderedRef.current[paper.id] = visionResult.renderedPages ?? []
+      setResult(visionResult)
+
+      const { questions, totalQuestions, failedBatches, hasFailures, batchStatuses } = visionResult
+
+      if (totalQuestions === 0) {
+        await byopService.update(paper.id, user.id, {
+          processing_status: 'failed',
+          notes: 'No questions could be extracted. The PDF may be blank or corrupted.',
+          batch_progress_json: batchStatuses,
+        })
+        setPapers(prev => prev.map(p => p.id === paper.id
+          ? { ...p, processing_status: 'failed', notes: 'No questions extracted.' }
+          : p
+        ))
+        toast.error('No questions found in this PDF.')
+        return
       }
 
-      // Create a paper entry in the main papers table
-      const newPaper = await paperService.createPaper({
-        title:           paper.title,
-        exam_name:       'Custom Upload',
-        exam_type:       'Custom',
-        year:            new Date().getFullYear(),
-        subject:         'General',
-        description:     `Uploaded by user: ${paper.file_name}`,
-        duration_minutes: 120,
-        status:          'draft',
-        created_by:      user.id,
+      // Decide status
+      const newStatus = hasFailures ? 'review_required' : 'extracted'
+
+      await byopService.update(paper.id, user.id, {
+        processing_status: newStatus,
+        total_pages:        visionResult.totalPages,
+        processed_pages:    visionResult.processedPages,
+        extracted_count:    totalQuestions,
+        questions_json:     questions.slice(0, 20), // preview
+        batch_progress_json: batchStatuses,
+        notes: hasFailures
+          ? `${totalQuestions} questions extracted. ${failedBatches.length} batch(es) failed — retry to complete.`
+          : `${totalQuestions} questions extracted from ${visionResult.processedPages} pages.`,
       })
 
-      // Save extracted questions
-      await questionService.saveQuestionsToSupabase(newPaper.id, result.questions)
+      setPapers(prev => prev.map(p => p.id === paper.id
+        ? { ...p, processing_status: newStatus, extracted_count: totalQuestions }
+        : p
+      ))
 
-      const updated = await byopService.update(paper.id, user.id, {
-        processing_status: 'ready',
-        extracted_count:   result.questions.length,
-        questions_json:    result.questions.slice(0, 10), // preview only
-        notes:             `Extracted ${result.questions.length} questions. Paper created: ${newPaper.id}`,
-      })
-      setPapers(prev => prev.map(p => p.id === paper.id ? updated : p))
-      toast.success(`Extracted ${result.questions.length} questions! Draft paper created.`)
+      setShowReview(true)
+      toast.success(`${totalQuestions} questions extracted!${hasFailures ? ' Some batches failed — you can retry.' : ''}`)
+
     } catch (err) {
-      const updated = await byopService.update(paper.id, user.id, {
+      const msg = err.message ?? 'Extraction failed'
+      await byopService.update(paper.id, user.id, {
         processing_status: 'failed',
-        notes: err.message,
+        notes: msg,
       })
-      setPapers(prev => prev.map(p => p.id === paper.id ? updated : p))
-      toast.error('Extraction failed: ' + err.message)
+      setPapers(prev => prev.map(p => p.id === paper.id
+        ? { ...p, processing_status: 'failed', notes: msg }
+        : p
+      ))
+      toast.error('Extraction failed: ' + msg)
     } finally {
-      setProcessing(null)
-      setProgress('')
+      setActiveId(null)
     }
   }
 
+  // ── Retry failed batches ───────────────────────────────────────────────────
+  async function handleRetryFailed(paper) {
+    if (!result?.failedBatches?.length) {
+      toast.info('No failed batches to retry.')
+      return
+    }
+
+    const stored = renderedRef.current[paper.id] ?? []
+    if (stored.length === 0) {
+      toast.error('Rendered pages no longer in memory. Please re-process the paper.')
+      return
+    }
+
+    // Collect only pages from failed batches
+    const failedPageNums = new Set(result.failedBatches.flatMap(fb => fb.pages ?? []))
+    const pagesToRetry   = stored.filter(p => failedPageNums.has(p.pageNumber) && !p.hasError)
+
+    if (pagesToRetry.length === 0) {
+      toast.error('No retryable pages found.')
+      return
+    }
+
+    setActiveId(paper.id)
+    setProgress({ statusText: `Retrying ${pagesToRetry.length} page(s)…`, stage: 'retrying' })
+
+    try {
+      const retryResult = await retryFailedPages(pagesToRetry, null, info => setProgress({ ...info }))
+      const newQs = retryResult.questions ?? []
+
+      if (newQs.length === 0) {
+        toast.warning('Retry returned no additional questions.')
+        return
+      }
+
+      // Merge into existing result
+      const merged = [...(result.questions ?? []), ...newQs]
+      const seen   = new Set()
+      const deduped = merged.filter(q => {
+        const k = String(q.question_number)
+        if (seen.has(k)) return false
+        seen.add(k); return true
+      }).sort((a, b) => (parseInt(a.question_number) || 0) - (parseInt(b.question_number) || 0))
+
+      setResult(prev => ({ ...prev, questions: deduped, totalQuestions: deduped.length, failedBatches: [] }))
+
+      await byopService.update(paper.id, user.id, {
+        processing_status: 'extracted',
+        extracted_count:   deduped.length,
+        notes:             `${deduped.length} questions after retry.`,
+      })
+      setPapers(prev => prev.map(p => p.id === paper.id
+        ? { ...p, processing_status: 'extracted', extracted_count: deduped.length }
+        : p
+      ))
+      toast.success(`${newQs.length} more questions recovered from retry!`)
+    } catch (err) {
+      toast.error('Retry failed: ' + err.message)
+    } finally {
+      setActiveId(null)
+      setProgress(null)
+    }
+  }
+
+  // ── Save questions to DB ───────────────────────────────────────────────────
+  async function handleSaveQuestions(editedQuestions) {
+    if (!result || !activeId) {
+      // Find which paper we're reviewing
+      const paper = papers.find(p => ['extracted','review_required'].includes(p.processing_status))
+      if (!paper) { toast.error('No active extraction to save.'); return }
+      await doSave(paper, editedQuestions)
+      return
+    }
+  }
+
+  // called from within an active-paper context
+  async function doSave(paper, editedQuestions) {
+    setSaving(true)
+    try {
+      // Create a draft paper entry in the central papers table
+      const newPaper = await paperService.createPaper({
+        title:            paper.title,
+        exam_name:        'Custom Upload',
+        exam_type:        'Custom',
+        year:             new Date().getFullYear(),
+        subject:          'General',
+        description:      `BYOP upload: ${paper.file_name}`,
+        duration_minutes: 120,
+        status:           'draft',
+        created_by:       user.id,
+      })
+
+      // Save to questions table (flat schema)
+      const toSave = editedQuestions
+        .filter(q => q.question_text?.trim() || q.tamil_question?.trim())
+        .map((q, i) => ({
+          question_number: parseInt(String(q.question_number), 10) || i + 1,
+          question_text:   [q.tamil_question, q.english_question].filter(Boolean).join('\n').trim()
+                           || q.question_text || `Question ${i + 1}`,
+          option_a:        q.option_a || '',
+          option_b:        q.option_b || '',
+          option_c:        q.option_c || '',
+          option_d:        q.option_d || '',
+          correct_option:  q.correct_option ?? null,
+          explanation:     null,
+        }))
+
+      await questionService.saveQuestionsToSupabase(newPaper.id, toSave, false)
+
+      // Update uploaded_papers record
+      await byopService.update(paper.id, user.id, {
+        processing_status: 'ready',
+        extracted_count:   toSave.length,
+        notes:             `${toSave.length} questions saved to paper "${newPaper.id}".`,
+      })
+
+      setPapers(prev => prev.map(p => p.id === paper.id
+        ? { ...p, processing_status: 'ready', extracted_count: toSave.length }
+        : p
+      ))
+
+      setShowReview(false)
+      setResult(null)
+      toast.success(`${toSave.length} questions saved! Draft paper created.`)
+    } catch (err) {
+      toast.error('Save failed: ' + err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-6 animate-fade-in">
+
+      {/* Page header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <Upload className="w-6 h-6 text-tnpsc-brand" />
           <div>
             <h1 className="text-xl font-bold text-body-text">Bring Your Own Paper</h1>
-            <p className="text-xs text-body-secondary">Upload PDF or images — AI extracts questions automatically</p>
+            <p className="text-xs text-body-secondary">
+              Upload PDF or images — Gemini Vision extracts Tamil &amp; English questions automatically
+            </p>
           </div>
         </div>
         <button
           onClick={() => fileRef.current?.click()}
-          disabled={uploading}
+          disabled={uploading || !!activeId}
           className="flex items-center gap-2 px-4 py-2.5 bg-tnpsc-brand text-white rounded-xl text-sm font-bold hover:bg-tnpsc-brand-hover transition-colors shadow-brand disabled:opacity-60"
         >
           {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
@@ -148,32 +573,53 @@ export function BYOPPage() {
         <input ref={fileRef} type="file" accept=".pdf,.jpg,.jpeg,.png" className="hidden" onChange={handleFileSelect} />
       </div>
 
-      {/* Processing progress banner */}
-      {processing && (
-        <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl p-4">
-          <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
-          <div>
-            <p className="text-sm font-bold text-blue-800">AI Processing in progress…</p>
-            <p className="text-xs text-blue-700 mt-0.5">{progress}</p>
+      {/* Pipeline info banner */}
+      <div className="bg-tnpsc-brand-light border border-tnpsc-brand/20 rounded-2xl p-4 flex items-start gap-3">
+        <Layers className="w-5 h-5 text-tnpsc-brand shrink-0 mt-0.5" />
+        <div>
+          <p className="text-sm font-bold text-tnpsc-brand">Vision-Only Extraction Pipeline</p>
+          <p className="text-xs text-body-secondary mt-0.5">
+            Pages are rendered as images and sent directly to Gemini Vision — no OCR text layer.
+            Supports Tamil, English, bilingual questions, tables, and diagrams.
+            Processed in batches of 2 pages. Identical pages are cached to avoid repeat API calls.
+          </p>
+        </div>
+      </div>
+
+      {/* Active processing overlay */}
+      {activeId && (
+        <div className="bg-blue-50 border border-blue-200 rounded-2xl p-5 space-y-3">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+            <p className="text-sm font-bold text-blue-800">
+              {progressInfo?.stage === 'rendering'   ? 'Rendering PDF pages…' :
+               progressInfo?.stage === 'extracting'  ? 'Extracting questions via Gemini Vision…' :
+               progressInfo?.stage === 'retrying'    ? 'Retrying failed pages…' :
+               progressInfo?.stage === 'complete'    ? 'Finalising…' :
+               'Starting extraction pipeline…'}
+            </p>
           </div>
+          <BatchProgress info={progressInfo} />
         </div>
       )}
 
       {/* Upload drop zone */}
       <div
-        onClick={() => fileRef.current?.click()}
+        onClick={() => !activeId && fileRef.current?.click()}
         className="border-2 border-dashed border-surface-border rounded-2xl p-8 text-center cursor-pointer hover:border-tnpsc-brand hover:bg-tnpsc-brand-light/30 transition-all group"
       >
         <Upload className="w-10 h-10 text-slate-300 group-hover:text-tnpsc-brand mx-auto mb-3 transition-colors" />
         <p className="text-sm font-semibold text-body-secondary group-hover:text-tnpsc-brand transition-colors">
           Click to upload PDF, JPG or PNG
         </p>
-        <p className="text-xs text-body-secondary mt-1">Max 35MB · AI will extract all questions automatically</p>
+        <p className="text-xs text-body-secondary mt-1">Max 35 MB · Bilingual TNPSC papers supported</p>
       </div>
 
       {/* Papers list */}
       {loading ? (
-        <div className="flex justify-center py-8"><Loader2 className="w-7 h-7 animate-spin text-tnpsc-brand" /></div>
+        <div className="flex justify-center py-8">
+          <Loader2 className="w-7 h-7 animate-spin text-tnpsc-brand" />
+        </div>
       ) : papers.length === 0 ? (
         <div className="text-center py-12 bg-white rounded-2xl border border-surface-border">
           <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -182,43 +628,116 @@ export function BYOPPage() {
       ) : (
         <div className="space-y-3">
           {papers.map(paper => {
-            const cfg = STATUS_CONFIG[paper.processing_status] ?? STATUS_CONFIG.uploaded
+            const cfg  = STATUS_CONFIG[paper.processing_status] ?? STATUS_CONFIG.uploaded
             const Icon = cfg.icon
-            const isProcessingThis = processing === paper.id
+            const isThis = activeId === paper.id
+            const isProcessable = ['uploaded','failed'].includes(paper.processing_status)
+            const hasFailedBatches = result?.hasFailures && activeId === null &&
+              papers.find(p => p.id === paper.id)?.processing_status === 'review_required'
 
             return (
-              <div key={paper.id} className="bg-white rounded-2xl border border-surface-border shadow-subtle p-5">
-                <div className="flex items-start justify-between gap-4">
+              <div key={paper.id} className="bg-white rounded-2xl border border-surface-border shadow-subtle overflow-hidden">
+                {/* Paper row */}
+                <div className="flex items-start justify-between gap-4 p-5">
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className={`flex items-center gap-1 text-[10px] font-bold uppercase rounded-full px-2 py-0.5 ${cfg.color}`}>
                         <Icon className="w-3 h-3" />
-                        {isProcessingThis ? 'Processing…' : cfg.label}
+                        {isThis ? 'Processing…' : cfg.label}
                       </span>
-                      <span className="text-[10px] text-body-secondary">{paper.file_type?.toUpperCase()}</span>
+                      {paper.file_type && (
+                        <span className="text-[10px] text-body-secondary uppercase font-medium">{paper.file_type}</span>
+                      )}
                     </div>
                     <h3 className="text-sm font-bold text-body-text truncate">{paper.title}</h3>
                     <p className="text-xs text-body-secondary mt-0.5">
-                      {paper.file_name} · {paper.extracted_count ? `${paper.extracted_count} questions extracted` : 'Not processed yet'}
+                      {paper.file_name}
+                      {paper.extracted_count ? ` · ${paper.extracted_count} questions extracted` : ''}
+                      {paper.total_pages ? ` · ${paper.total_pages} pages` : ''}
                     </p>
-                    {paper.notes && paper.processing_status === 'failed' && (
-                      <p className="text-xs text-red-600 mt-1 line-clamp-2">{paper.notes}</p>
+                    {paper.notes && !['uploaded'].includes(paper.processing_status) && (
+                      <p className={`text-xs mt-1 line-clamp-2 ${
+                        paper.processing_status === 'failed' ? 'text-red-600' : 'text-body-secondary'
+                      }`}>
+                        {paper.notes}
+                      </p>
                     )}
                   </div>
+
+                  {/* Action buttons */}
                   <div className="flex items-center gap-2 shrink-0">
-                    {(paper.processing_status === 'uploaded' || paper.processing_status === 'failed') && (
+                    {isProcessable && (
                       <button
                         onClick={() => handleProcess(paper)}
-                        disabled={!!processing}
+                        disabled={!!activeId}
                         className="px-3 py-1.5 bg-tnpsc-brand text-white text-xs font-bold rounded-lg hover:bg-tnpsc-brand-hover transition-colors disabled:opacity-40"
                       >
                         {paper.processing_status === 'failed' ? 'Retry' : 'Process'}
                       </button>
                     )}
+
+                    {/* View extracted questions */}
+                    {['extracted','review_required'].includes(paper.processing_status) &&
+                      result?.questions?.length > 0 && activeId === null && (
+                      <button
+                        onClick={() => setShowReview(r => !r)}
+                        className="px-3 py-1.5 bg-tnpsc-brand-light text-tnpsc-brand text-xs font-bold rounded-lg hover:bg-tnpsc-brand hover:text-white transition-colors"
+                      >
+                        {showReview ? 'Hide' : 'Review'} Questions
+                      </button>
+                    )}
+
+                    {/* Retry failed batches */}
+                    {paper.processing_status === 'review_required' &&
+                      result?.failedBatches?.length > 0 && activeId === null && (
+                      <button
+                        onClick={() => handleRetryFailed(paper)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 text-amber-800 text-xs font-bold rounded-lg hover:bg-amber-200 transition-colors"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Retry {result.failedBatches.length} failed batch(es)
+                      </button>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center justify-between mt-3 text-[10px] text-body-secondary">
-                  <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatDate(paper.created_at)}</span>
+
+                {/* Batch progress details (collapsed) */}
+                {paper.batch_progress_json?.length > 0 && !isThis && (
+                  <div className="px-5 pb-3">
+                    <div className="flex flex-wrap gap-1.5">
+                      {paper.batch_progress_json.map((b, i) => (
+                        <span key={i}
+                          className={`text-[10px] font-semibold rounded px-2 py-0.5 ${
+                            b.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
+                            b.status === 'failed'    ? 'bg-red-100 text-red-700' :
+                                                       'bg-slate-100 text-slate-600'
+                          }`}
+                          title={b.error ?? `Pages ${(b.pages ?? []).join('–')}`}
+                        >
+                          p.{(b.pages ?? []).join('–')} {b.status === 'failed' ? '✗' : '✓'}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Inline review panel */}
+                {showReview && result?.questions?.length > 0 && activeId === null &&
+                  paper.processing_status !== 'ready' && (
+                  <div className="border-t border-surface-border p-5">
+                    <QuestionsPanel
+                      questions={result.questions}
+                      onSave={(qs) => doSave(paper, qs)}
+                      saving={saving}
+                    />
+                  </div>
+                )}
+
+                {/* Footer metadata */}
+                <div className="flex items-center justify-between px-5 py-3 border-t border-surface-border bg-slate-50 text-[10px] text-body-secondary">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3 h-3" /> {formatDate(paper.created_at)}
+                  </span>
                   {paper.file_size_bytes && (
                     <span>{(paper.file_size_bytes / 1024 / 1024).toFixed(1)} MB</span>
                   )}

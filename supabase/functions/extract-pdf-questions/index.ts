@@ -1,401 +1,515 @@
 // @ts-nocheck
 // Supabase Edge Function: extract-pdf-questions
-// Deno runtime environment for secure, server-side Gemini AI PDF Question & Answer Extraction
+// Vision-only pipeline — NO OCR text layer
+// Model is configurable via GEMINI_MODEL env variable
+// Supports batches of 1–4 page images per request
 
 declare const Deno: any;
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
+// ─── Constants ────────────────────────────────────────────────────────────────
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-goog-api-key",
-  "Access-Control-Allow-Methods": "POST, GET, OPTIONS, PUT, DELETE",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-export interface OptionItem {
-  label: string;
-  text: string;
+// Model priority: read from env first, then fall through the fallback chain.
+// Admin can set GEMINI_MODEL=gemini-3.6-flash in Supabase Vault to lock a model.
+function getModelFallbacks(): string[] {
+  const envModel = Deno.env.get("GEMINI_MODEL");
+  const defaults = [
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+  ];
+  if (envModel && !defaults.includes(envModel)) {
+    return [envModel, ...defaults];
+  }
+  if (envModel) {
+    // Promote the env model to the front
+    return [envModel, ...defaults.filter((m) => m !== envModel)];
+  }
+  return defaults;
 }
 
-export interface ExtractedQuestion {
-  question_number: string | number;
-  question_text: string;
-  options: OptionItem[];
-  marked_answer: string | null;
-  marked_option_index: number | null;
-  answer_status: "marked" | "not_marked" | "uncertain" | "multiple_marked" | "unreadable";
-  confidence: number;
-  page_number: number;
-  extraction_notes?: string;
-}
+// ─── TNPSC bilingual extraction prompt ────────────────────────────────────────
+// Strict vision-only: NO text extraction, NO OCR fallback, NO invented content.
+const SYSTEM_PROMPT = `You are a precise document extraction engine specialised in TNPSC (Tamil Nadu Public Service Commission) examination question papers.
 
-export interface ExtractionResponsePayload {
-  document_title?: string;
-  total_pages?: number;
-  questions: ExtractedQuestion[];
-  warnings?: string[];
-}
+These papers are bilingual: questions appear in Tamil (தமிழ்) and/or English.
 
-const GEMINI_MODEL_FALLBACKS = [
-  "gemini-3.6-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash",
-];
+YOUR ONLY JOB: Read the supplied page image(s) and return structured JSON. Nothing else.
 
-const SYSTEM_INSTRUCTION = `You are a highly accurate document extraction engine.
+═══════════════════════════════
+EXTRACTION RULES (MANDATORY)
+═══════════════════════════════
+1.  Extract ONLY information visibly present in the image. Do NOT invent content.
+2.  Preserve Tamil text exactly as Tamil. Do NOT transliterate or translate.
+3.  Preserve English text exactly as English. Do NOT translate into Tamil.
+4.  If both Tamil and English versions of a question appear, populate BOTH
+    tamil_question and english_question fields.
+5.  If only one language appears, populate only that field; set the other to null.
+6.  Preserve the original question numbering exactly.
+7.  Preserve option labels exactly (A, B, C, D — or 1, 2, 3, 4 mapped to A–D).
+8.  If five options (A–E) are visible, include all five; set missing ones to null.
+9.  Do NOT merge two separate questions into one.
+10. Do NOT split one question across two question objects.
+11. Do NOT discard questions that contain diagrams or tables.
+    Set has_diagram: true and preserve all readable text around it.
+12. For match-the-following questions, preserve the column structure as readable text.
+13. For assertion/reason questions, preserve the assertion and reason texts separately
+    within question_text or tamil_question / english_question.
+14. For numerical/mathematical content, reproduce as accurately as possible.
+15. If a page section is a header, footer, instructions, or answer key only —
+    return an empty questions array for that page; do not force-extract non-questions.
+16. Set extraction_status:
+    "complete"   — all question text and options clearly readable
+    "partial"    — some text unreadable or cut off (preserve what is readable)
+    "unreadable" — entire question is illegible
+17. Do NOT set correct_option unless an answer key is explicitly visible on the page
+    for that question. If not visible, set correct_option: null.
+18. Do NOT guess or infer correct answers from knowledge.
+19. Return ONLY the JSON object. No markdown. No explanation. No preamble.
 
-Your task is to extract multiple-choice questions from the supplied question paper.
+═══════════════════════════════
+SUPPORTED QUESTION TYPES
+═══════════════════════════════
+mcq | match_following | assertion_reason | statement_based | numerical | diagram_based | table_based | unknown
 
-Rules:
-1. Extract only information visibly present in the document.
-2. Do not invent missing questions.
-3. Do not rewrite or paraphrase question text.
-4. Preserve the original question numbering.
-5. Preserve the exact option text as much as possible.
-6. Extract all visible options.
-7. Identify the option that is visibly ticked, checked, circled, highlighted, filled, or otherwise marked as the selected answer.
-8. Do not solve the question yourself.
-9. Do not infer the correct answer from general knowledge.
-10. If no answer is visibly marked, return answer_status as "not_marked".
-11. If the mark is unclear, return answer_status as "uncertain".
-12. If multiple options are marked, return answer_status as "multiple_marked".
-13. If the question or option is unreadable, preserve the readable portion and report the issue.
-14. Never guess a missing answer.
-15. Return valid JSON only.
-16. Include a confidence score based on visual clarity, not on whether the answer seems logically correct.
-
-Allowed answer_status values: "marked", "not_marked", "uncertain", "multiple_marked", "unreadable".
-
-Expected JSON structure:
+═══════════════════════════════
+REQUIRED JSON SCHEMA
+═══════════════════════════════
 {
-  "document_title": "",
-  "total_pages": 1,
-  "questions": [
+  "pages": [
     {
-      "question_number": "1",
-      "question_text": "Exact question text",
-      "options": [
-        { "label": "A", "text": "Option text" },
-        { "label": "B", "text": "Option text" },
-        { "label": "C", "text": "Option text" },
-        { "label": "D", "text": "Option text" }
-      ],
-      "marked_answer": "B",
-      "marked_option_index": 1,
-      "answer_status": "marked",
-      "confidence": 0.96,
-      "page_number": 1,
-      "extraction_notes": ""
+      "page_number": <integer>,
+      "questions": [
+        {
+          "question_number": "<string>",
+          "question_type": "<mcq|match_following|assertion_reason|statement_based|numerical|diagram_based|table_based|unknown>",
+          "tamil_question": "<Tamil text or null>",
+          "english_question": "<English text or null>",
+          "options": {
+            "A": "<text or null>",
+            "B": "<text or null>",
+            "C": "<text or null>",
+            "D": "<text or null>",
+            "E": null
+          },
+          "correct_option": null,
+          "source_page": <integer>,
+          "extraction_status": "<complete|partial|unreadable>",
+          "has_diagram": false
+        }
+      ]
     }
-  ],
-  "warnings": []
-}`;
+  ]
+}
 
-function cleanAndParseJson(rawText: string): ExtractionResponsePayload {
-  let cleaned = rawText.trim();
+Return ONLY this JSON. No other text.`;
 
-  // Strip markdown code fences if present
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+// ─── Types ─────────────────────────────────────────────────────────────────────
+interface PageImage {
+  page_number: number;
+  image_base64: string;   // raw base64, no data-URI prefix
+  mime_type: string;      // e.g. "image/jpeg"
+}
+
+interface ExtractedQuestion {
+  question_number: string;
+  question_type: string;
+  tamil_question: string | null;
+  english_question: string | null;
+  options: Record<string, string | null>;
+  correct_option: string | null;
+  source_page: number;
+  extraction_status: "complete" | "partial" | "unreadable";
+  has_diagram: boolean;
+}
+
+interface PageResult {
+  page_number: number;
+  questions: ExtractedQuestion[];
+}
+
+interface ExtractionResponse {
+  pages: PageResult[];
+}
+
+// ─── JSON repair helper ────────────────────────────────────────────────────────
+function extractAndParseJson(raw: string): ExtractionResponse {
+  let text = raw.trim();
+
+  // Strip markdown fences
+  if (text.startsWith("```")) {
+    text = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   }
 
+  // First attempt: direct parse
   try {
-    const parsed = JSON.parse(cleaned);
-    return normalizeExtractionPayload(parsed);
-  } catch (err: any) {
-    // Attempt repair step: search for JSON object boundary
-    const startIdx = cleaned.indexOf("{");
-    const endIdx = cleaned.lastIndexOf("}");
-    if (startIdx !== -1 && endIdx > startIdx) {
+    return JSON.parse(text);
+  } catch (_e1) {
+    // Second attempt: find outer JSON object boundaries
+    const start = text.indexOf("{");
+    const end   = text.lastIndexOf("}");
+    if (start !== -1 && end > start) {
       try {
-        const repairedStr = cleaned.substring(startIdx, endIdx + 1);
-        const repaired = JSON.parse(repairedStr);
-        return normalizeExtractionPayload(repaired);
-      } catch (e2) {
-        throw new Error(`JSON parsing failed: ${err.message}`);
-      }
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (_e2) { /* fall through */ }
     }
-    throw new Error(`JSON parsing failed: ${err.message}`);
+    // Third attempt: find outer JSON array boundaries (Gemini sometimes wraps in [])
+    const aStart = text.indexOf("[");
+    const aEnd   = text.lastIndexOf("]");
+    if (aStart !== -1 && aEnd > aStart) {
+      try {
+        const arr = JSON.parse(text.slice(aStart, aEnd + 1));
+        // Wrap bare array into our expected shape
+        return { pages: Array.isArray(arr) ? arr : [] };
+      } catch (_e3) { /* fall through */ }
+    }
+    throw new Error(`INVALID_JSON: Could not parse Gemini response. First 200 chars: ${text.slice(0, 200)}`);
   }
 }
 
-function normalizeExtractionPayload(data: any): ExtractionResponsePayload {
-  if (!data || typeof data !== "object") {
-    throw new Error("Invalid payload: expected an object");
-  }
+// ─── Normalize a single question from raw Gemini output ──────────────────────
+function normalizeQuestion(q: any, pageNum: number, idx: number): ExtractedQuestion {
+  const qNum = String(q.question_number ?? idx + 1).trim();
 
-  const rawQuestions = Array.isArray(data.questions) ? data.questions : [];
-  const normalizedQuestions: ExtractedQuestion[] = [];
+  const validTypes = [
+    "mcq","match_following","assertion_reason","statement_based",
+    "numerical","diagram_based","table_based","unknown",
+  ];
+  const qType = validTypes.includes(q.question_type) ? q.question_type : "mcq";
 
-  const allowedStatuses = ["marked", "not_marked", "uncertain", "multiple_marked", "unreadable"];
-
-  for (let idx = 0; idx < rawQuestions.length; idx++) {
-    const q = rawQuestions[idx];
-    if (!q || typeof q !== "object") continue;
-
-    const qNumStr = String(q.question_number || idx + 1).trim();
-    const qText = String(q.question_text || "").trim();
-
-    // Process options
-    let rawOptions = Array.isArray(q.options) ? q.options : [];
-    const options: OptionItem[] = [];
-
-    rawOptions.forEach((opt: any, optIdx: number) => {
-      if (typeof opt === "string") {
-        const labels = ["A", "B", "C", "D", "E", "F"];
-        options.push({ label: labels[optIdx] || String(optIdx + 1), text: opt.trim() });
-      } else if (opt && typeof opt === "object") {
-        options.push({
-          label: String(opt.label || opt.key || String.fromCharCode(65 + optIdx)).toUpperCase().trim(),
-          text: String(opt.text || opt.value || "").trim(),
-        });
-      }
-    });
-
-    let status = String(q.answer_status || "not_marked").toLowerCase().trim();
-    if (!allowedStatuses.includes(status)) {
-      status = q.marked_answer ? "marked" : "not_marked";
+  // Options: accept both object {A,B,C,D} and array [{label,text}]
+  let options: Record<string, string | null> = { A: null, B: null, C: null, D: null, E: null };
+  if (q.options && typeof q.options === "object" && !Array.isArray(q.options)) {
+    for (const k of ["A","B","C","D","E"]) {
+      const v = q.options[k];
+      options[k] = v != null ? String(v).trim() || null : null;
     }
-
-    let markedAns = q.marked_answer ? String(q.marked_answer).toUpperCase().trim() : null;
-    let markedIndex = typeof q.marked_option_index === "number" ? q.marked_option_index : null;
-
-    if (markedAns && markedIndex === null) {
-      markedIndex = options.findIndex((o) => o.label === markedAns);
-      if (markedIndex === -1) markedIndex = null;
-    }
-
-    let confidence = Number(q.confidence);
-    if (isNaN(confidence) || confidence < 0 || confidence > 1) {
-      confidence = status === "marked" ? 0.95 : 0.8;
-    }
-
-    const pageNum = Number(q.page_number) || 1;
-
-    normalizedQuestions.push({
-      question_number: qNumStr,
-      question_text: qText,
-      options,
-      marked_answer: markedAns,
-      marked_option_index: markedIndex,
-      answer_status: status as any,
-      confidence: Number(confidence.toFixed(2)),
-      page_number: pageNum,
-      extraction_notes: String(q.extraction_notes || "").trim(),
+  } else if (Array.isArray(q.options)) {
+    const labels = ["A","B","C","D","E"];
+    q.options.forEach((o: any, i: number) => {
+      const label = o?.label ?? labels[i];
+      const text  = o?.text ?? (typeof o === "string" ? o : null);
+      if (label && text != null) options[String(label).toUpperCase()] = String(text).trim() || null;
     });
   }
+
+  const correctOpt = q.correct_option
+    ? String(q.correct_option).toUpperCase().trim()
+    : null;
+  const validOpt = ["A","B","C","D","E"].includes(correctOpt ?? "") ? correctOpt : null;
+
+  const validStatuses = ["complete","partial","unreadable"];
+  const status = validStatuses.includes(q.extraction_status) ? q.extraction_status : "complete";
 
   return {
-    document_title: String(data.document_title || "").trim(),
-    total_pages: Number(data.total_pages) || 1,
-    questions: normalizedQuestions,
-    warnings: Array.isArray(data.warnings) ? data.warnings.map(String) : [],
+    question_number:   qNum,
+    question_type:     qType,
+    tamil_question:    q.tamil_question   ? String(q.tamil_question).trim()   : null,
+    english_question:  q.english_question ? String(q.english_question).trim() : null,
+    options,
+    correct_option:    validOpt,
+    source_page:       Number(q.source_page ?? pageNum),
+    extraction_status: status as "complete" | "partial" | "unreadable",
+    has_diagram:       Boolean(q.has_diagram),
   };
 }
 
+// ─── Normalize full response ──────────────────────────────────────────────────
+function normalizeResponse(raw: any): ExtractionResponse {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("INVALID_JSON: Response is not an object");
+  }
+
+  // Handle both { pages: [...] } and direct array
+  const pagesRaw: any[] = Array.isArray(raw.pages)
+    ? raw.pages
+    : Array.isArray(raw)
+    ? raw
+    : [];
+
+  const pages: PageResult[] = pagesRaw.map((p: any) => {
+    const pageNum = Number(p.page_number ?? 1);
+    const rawQs   = Array.isArray(p.questions) ? p.questions : [];
+    const questions = rawQs
+      .filter((q: any) => q && typeof q === "object")
+      .map((q: any, i: number) => normalizeQuestion(q, pageNum, i));
+    return { page_number: pageNum, questions };
+  });
+
+  return { pages };
+}
+
+// ─── Gemini API caller (single attempt, one model) ────────────────────────────
+async function callGemini(
+  apiKey: string,
+  model: string,
+  pageImages: PageImage[]
+): Promise<ExtractionResponse> {
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+
+  // Build parts: system prompt + one inlineData part per page image
+  const parts: any[] = [{ text: SYSTEM_PROMPT }];
+
+  for (const pi of pageImages) {
+    // Strip any data-URI prefix the client may have included
+    const cleanB64 = pi.image_base64.replace(/^data:image\/\w+;base64,/, "");
+    parts.push({
+      inlineData: {
+        mimeType: pi.mime_type || "image/jpeg",
+        data: cleanB64,
+      },
+    });
+  }
+
+  // Add the per-batch instruction
+  const pageNums = pageImages.map((p) => p.page_number).join(", ");
+  parts.push({
+    text: `Extract all multiple-choice questions from page(s) ${pageNums}. ` +
+          `Each question object must include the source_page field matching the page it came from. ` +
+          `Return ONLY the JSON object matching the schema above.`,
+  });
+
+  const body = JSON.stringify({
+    contents: [{ parts }],
+    generationConfig: {
+      temperature: 0.1,
+      // No responseMimeType — not universally supported; we parse JSON from text
+    },
+  });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey,
+    },
+    body,
+  });
+
+  const rawText = await res.text();
+
+  if (!res.ok) {
+    let errMsg = rawText;
+    try {
+      errMsg = JSON.parse(rawText)?.error?.message ?? rawText;
+    } catch { /* keep raw */ }
+
+    // Classify the error so callers can decide whether to retry / skip model
+    const isModelGone =
+      res.status === 404 ||
+      /not available|not found|model.*deprecated|is no longer available|no longer supported/i.test(errMsg);
+
+    if (isModelGone) {
+      const e: any = new Error(`MODEL_NOT_SUPPORTED: ${model} — ${errMsg.slice(0, 200)}`);
+      e.code = "MODEL_NOT_SUPPORTED";
+      throw e;
+    }
+
+    if (res.status === 429) {
+      const e: any = new Error(`GEMINI_RATE_LIMIT: ${errMsg.slice(0, 200)}`);
+      e.code = "GEMINI_RATE_LIMIT";
+      e.retryAfterMs = (() => {
+        const m = errMsg.match(/retry.*?(\d+(?:\.\d+)?)\s*s/i);
+        return m ? Math.ceil(parseFloat(m[1]) + 3) * 1000 : 20_000;
+      })();
+      throw e;
+    }
+
+    if (res.status >= 500) {
+      const e: any = new Error(`GEMINI_API_ERROR: HTTP ${res.status} — ${errMsg.slice(0, 200)}`);
+      e.code = "GEMINI_API_ERROR";
+      throw e;
+    }
+
+    const e: any = new Error(`GEMINI_API_ERROR: HTTP ${res.status} — ${errMsg.slice(0, 200)}`);
+    e.code = "GEMINI_API_ERROR";
+    throw e;
+  }
+
+  // Parse the successful response
+  let geminiData: any;
+  try {
+    geminiData = JSON.parse(rawText);
+  } catch {
+    throw new Error("GEMINI_API_ERROR: Response is not valid JSON");
+  }
+
+  const content = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!content) {
+    throw new Error("GEMINI_API_ERROR: Empty content in Gemini response");
+  }
+
+  // Parse + normalize the extraction JSON
+  const rawParsed = extractAndParseJson(content);
+  return normalizeResponse(rawParsed);
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
 serve(async (req: any) => {
-  // CORS Preflight Handler
+  // ── CORS preflight ──
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: CORS_HEADERS, status: 200 });
   }
 
   try {
-    const authHeader = req.headers.get("Authorization") || req.headers.get("authorization");
+    // ── Auth ──
+    const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
     if (!authHeader) {
-      return new Response(JSON.stringify({ error: "Missing Authorization header" }), {
-        status: 401,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      });
+      return jsonError(401, "UNAUTHORIZED", "Missing Authorization header");
     }
 
+    const supabaseUrl     = Deno.env.get("SUPABASE_URL")             ?? "";
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")        ?? "";
+    const serviceRoleKey  = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
     const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-    let isAuthorized = false;
-    if (token === supabaseAnonKey || token === supabaseServiceKey || token.length > 10) {
-      isAuthorized = true;
-    } else {
-      const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
-        global: { headers: { Authorization: authHeader } },
-      });
-      const { data: { user } } = await supabaseClient.auth.getUser();
-      if (user) isAuthorized = true;
-    }
+    // Accept anon key, service role key, or a valid user JWT (length heuristic)
+    const isAuthorized =
+      token === supabaseAnonKey ||
+      token === serviceRoleKey ||
+      token.length > 20;
 
     if (!isAuthorized) {
-      return new Response(JSON.stringify({ error: "Unauthorized request" }), {
-        status: 401,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      });
+      return jsonError(401, "UNAUTHORIZED", "Invalid authorization token");
     }
 
-    // Fetch secure Gemini API key from environment variable
+    // ── API key ──
     const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
     if (!geminiApiKey) {
-      return new Response(
-        JSON.stringify({
-          error: "Gemini API key is not configured",
-        }),
-        {
-          status: 500,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        }
-      );
+      return jsonError(500, "GEMINI_API_ERROR", "GEMINI_API_KEY secret is not configured in Supabase Vault");
     }
 
-    const payload = await req.json();
-    const { imageBase64, pdfBase64, mimeType = "image/jpeg", pageNumber = 1, pdfText = "" } = payload;
-
-    if (!imageBase64 && !pdfBase64 && !pdfText) {
-      return new Response(
-        JSON.stringify({ error: "Payload must contain imageBase64, pdfBase64, or pdfText" }),
-        {
-          status: 400,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        }
-      );
+    // ── Parse request body ──
+    let body: any;
+    try {
+      body = await req.json();
+    } catch {
+      return jsonError(400, "INVALID_REQUEST", "Request body is not valid JSON");
     }
 
-    // Build Gemini API payload
-    const parts: any[] = [{ text: SYSTEM_INSTRUCTION }];
+    // Expected: { pages: [{ page_number, image_base64, mime_type }] }
+    // Also supports legacy single-page: { imageBase64, mimeType, pageNumber }
+    let pageImages: PageImage[] = [];
 
-    if (pdfText) {
-      parts.push({
-        text: `The following is extracted text from page ${pageNumber} of the question paper:\n\n${pdfText}`,
-      });
+    if (Array.isArray(body.pages) && body.pages.length > 0) {
+      // New batch format
+      pageImages = body.pages.map((p: any) => ({
+        page_number:   Number(p.page_number ?? 1),
+        image_base64:  String(p.image_base64 ?? p.imageBase64 ?? ""),
+        mime_type:     String(p.mime_type ?? p.mimeType ?? "image/jpeg"),
+      }));
+    } else if (body.imageBase64) {
+      // Legacy single-page format (backwards compatibility)
+      pageImages = [{
+        page_number:  Number(body.pageNumber ?? 1),
+        image_base64: String(body.imageBase64),
+        mime_type:    String(body.mimeType ?? "image/jpeg"),
+      }];
+    } else {
+      return jsonError(400, "INVALID_REQUEST", "Request must include 'pages' array or 'imageBase64'");
     }
 
-    if (imageBase64) {
-      const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
-      parts.push({
-        inlineData: {
-          mimeType: mimeType,
-          data: cleanBase64,
-        },
-      });
-    } else if (pdfBase64) {
-      const cleanPdfBase64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "");
-      parts.push({
-        inlineData: {
-          mimeType: "application/pdf",
-          data: cleanPdfBase64,
-        },
-      });
+    // Validate images are present
+    const emptyImages = pageImages.filter((p) => !p.image_base64);
+    if (emptyImages.length > 0) {
+      return jsonError(400, "IMAGE_PROCESSING_ERROR",
+        `Pages ${emptyImages.map((p) => p.page_number).join(",")} have no image data`);
     }
 
-    parts.push({
-      text: `Analyze page ${pageNumber} visually. Detect all multiple-choice questions, option letters/text, and identify any visibly marked/ticked/circled/highlighted answers. Return structured JSON strictly adhering to the schema.`,
-    });
+    // ── Try models with retry logic ──
+    const models      = getModelFallbacks();
+    let lastErr: any  = null;
+    let result: ExtractionResponse | null = null;
+    let usedModel     = "";
 
-    // Try the currently supported Gemini model(s) in order, since Google retires older models for new users.
-    let geminiData: any = null;
-    let lastModelError = "";
+    for (const model of models) {
+      let attempt = 0;
+      const maxAttempts = 3; // up to 2 retries per model for transient errors
 
-    for (const modelName of GEMINI_MODEL_FALLBACKS) {
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+      while (attempt < maxAttempts) {
+        attempt++;
+        try {
+          result    = await callGemini(geminiApiKey, model, pageImages);
+          usedModel = model;
+          break; // success
+        } catch (err: any) {
+          lastErr = err;
 
-      try {
-        const geminiRes = await fetch(geminiUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": geminiApiKey,
-          },
-          body: JSON.stringify({
-            contents: [{ parts }],
-            generationConfig: {
-              temperature: 0.1,
-            },
-          }),
-        });
+          if (err.code === "MODEL_NOT_SUPPORTED") {
+            // Skip to next model immediately
+            console.warn(`[vision] Model ${model} not supported, trying next`);
+            break;
+          }
 
-        const errText = await geminiRes.text();
+          if (err.code === "GEMINI_RATE_LIMIT") {
+            if (attempt < maxAttempts) {
+              const wait = err.retryAfterMs ?? 20_000;
+              console.warn(`[vision] Rate limit on ${model}, waiting ${wait}ms`);
+              await new Promise((r) => setTimeout(r, wait));
+              continue; // retry same model
+            }
+            break; // exhausted retries for this model, try next
+          }
 
-        if (geminiRes.ok) {
-          geminiData = JSON.parse(errText || "{}");
+          if (err.code === "GEMINI_API_ERROR") {
+            if (attempt < maxAttempts) {
+              const backoff = 2000 * attempt;
+              console.warn(`[vision] API error on ${model} attempt ${attempt}, retrying in ${backoff}ms`);
+              await new Promise((r) => setTimeout(r, backoff));
+              continue;
+            }
+            break;
+          }
+
+          if (err.code === "INVALID_JSON" && attempt < maxAttempts) {
+            // One JSON repair retry
+            console.warn(`[vision] Invalid JSON from ${model}, retrying once`);
+            await new Promise((r) => setTimeout(r, 1000));
+            continue;
+          }
+
+          // Unknown error — don't retry
           break;
         }
-
-        let safeErrorMessage = errText;
-        try {
-          const parsedJson = JSON.parse(errText);
-          safeErrorMessage = parsedJson.error?.message || errText;
-        } catch (e) {}
-
-        const isModelUnavailable = 
-          geminiRes.status === 404 || 
-          (geminiRes.status === 400 && /not available|not found|model.*deprecated|is no longer available|no longer supported/i.test(safeErrorMessage)) ||
-          /not available|not found|model.*deprecated|is no longer available|no longer supported/i.test(safeErrorMessage);
-        if (isModelUnavailable) {
-          console.warn(`Gemini model ${modelName} unavailable, falling back to next option:`, safeErrorMessage);
-          lastModelError = safeErrorMessage;
-          continue;
-        }
-
-        return new Response(
-          JSON.stringify({
-            error: "Gemini API request failed",
-            details: safeErrorMessage,
-          }),
-          {
-            status: geminiRes.status >= 500 ? 502 : geminiRes.status,
-            headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-          }
-        );
-      } catch (error: any) {
-        lastModelError = error?.message || String(error);
-        console.error(`Gemini model ${modelName} request failed:`, lastModelError);
       }
+
+      if (result) break; // got a result, stop trying models
     }
 
-    if (!geminiData) {
-      return new Response(
-        JSON.stringify({
-          error: "Gemini API request failed",
-          details: lastModelError || "No supported Gemini model could be reached.",
-        }),
-        {
-          status: 502,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        }
-      );
+    if (!result) {
+      const code = lastErr?.code ?? "GEMINI_API_ERROR";
+      const msg  = lastErr?.message ?? "All Gemini models failed";
+      console.error(`[vision] All models failed. Last error: ${msg}`);
+      return jsonError(502, code, msg);
     }
 
-    const rawContent = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!rawContent) {
-      return new Response(
-        JSON.stringify({
-          error: "Gemini API request failed",
-          details: "Empty or invalid content response received from Gemini model.",
-        }),
-        { status: 502, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Parse and validate structured output
-    const structuredResult = cleanAndParseJson(rawContent);
-
-    return new Response(JSON.stringify(structuredResult), {
-      status: 200,
-      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-    });
-  } catch (err: any) {
-    console.error("Edge function execution error:", err);
+    // ── Return successful extraction ──
     return new Response(
-      JSON.stringify({
-        error: "Internal server error",
-        details: err.message || "Edge function processing failed",
-      }),
-      {
-        status: 500,
-        headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ ...result, model_used: usedModel }),
+      { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
     );
+
+  } catch (fatal: any) {
+    console.error("[vision] Unhandled error:", fatal);
+    return jsonError(500, "INTERNAL_ERROR", fatal?.message ?? "Edge function crashed");
   }
 });
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+function jsonError(status: number, code: string, message: string) {
+  return new Response(
+    JSON.stringify({ error: code, message }),
+    { status, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+  );
+}
