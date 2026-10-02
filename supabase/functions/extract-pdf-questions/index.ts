@@ -2,7 +2,7 @@
 // Supabase Edge Function: extract-pdf-questions
 // Vision-only pipeline — NO OCR text layer
 // Model is configurable via GEMINI_MODEL env variable
-// Supports batches of 1–4 page images per request
+// RESOURCE-OPTIMIZED: Processes ONE page per request to avoid HTTP 546 WORKER_RESOURCE_LIMIT
 
 declare const Deno: any;
 
@@ -248,12 +248,30 @@ function normalizeResponse(raw: any): ExtractionResponse {
   return { pages };
 }
 
+// ─── Resource usage logging helper ─────────────────────────────────────────────
+function logRequestSize(pageImages: PageImage[]): void {
+  let totalBase64Bytes = 0;
+  for (const pi of pageImages) {
+    const cleanB64 = pi.image_base64.replace(/^data:image\/\w+;base64,/, "");
+    totalBase64Bytes += cleanB64.length;
+  }
+  const totalBase64MB = (totalBase64Bytes / (1024 * 1024)).toFixed(2);
+  const estimatedDecodedMB = (totalBase64Bytes * 0.75 / (1024 * 1024)).toFixed(2);
+  
+  console.log(`[RESOURCE] Processing ${pageImages.length} page(s)`);
+  console.log(`[RESOURCE] Total base64 size: ${totalBase64MB} MB`);
+  console.log(`[RESOURCE] Estimated decoded size: ${estimatedDecodedMB} MB`);
+}
+
 // ─── Gemini API caller (single attempt, one model) ────────────────────────────
 async function callGemini(
   apiKey: string,
   model: string,
   pageImages: PageImage[]
 ): Promise<ExtractionResponse> {
+
+  console.log(`[GEMINI] Using model: ${model}`);
+  logRequestSize(pageImages);
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
@@ -262,6 +280,7 @@ async function callGemini(
 
   for (const pi of pageImages) {
     // Strip any data-URI prefix the client may have included
+    // DO NOT create multiple copies — use the cleaned string directly
     const cleanB64 = pi.image_base64.replace(/^data:image\/\w+;base64,/, "");
     parts.push({
       inlineData: {
@@ -286,6 +305,11 @@ async function callGemini(
       // No responseMimeType — not universally supported; we parse JSON from text
     },
   });
+
+  // Release image references AFTER JSON.stringify to free memory before network call
+  for (const pi of pageImages) {
+    pi.image_base64 = "";
+  }
 
   const res = await fetch(url, {
     method: "POST",
@@ -397,17 +421,22 @@ serve(async (req: any) => {
       return jsonError(400, "INVALID_REQUEST", "Request body is not valid JSON");
     }
 
+    // RESOURCE LIMIT: Accept ONLY ONE page per request to avoid HTTP 546
     // Expected: { pages: [{ page_number, image_base64, mime_type }] }
     // Also supports legacy single-page: { imageBase64, mimeType, pageNumber }
     let pageImages: PageImage[] = [];
 
     if (Array.isArray(body.pages) && body.pages.length > 0) {
-      // New batch format
-      pageImages = body.pages.map((p: any) => ({
+      // ENFORCE: Only process the FIRST page
+      if (body.pages.length > 1) {
+        console.warn(`[RESOURCE] Client sent ${body.pages.length} pages — processing only the first to avoid RESOURCE_LIMIT`);
+      }
+      const p = body.pages[0];
+      pageImages = [{
         page_number:   Number(p.page_number ?? 1),
         image_base64:  String(p.image_base64 ?? p.imageBase64 ?? ""),
         mime_type:     String(p.mime_type ?? p.mimeType ?? "image/jpeg"),
-      }));
+      }];
     } else if (body.imageBase64) {
       // Legacy single-page format (backwards compatibility)
       pageImages = [{
@@ -420,10 +449,8 @@ serve(async (req: any) => {
     }
 
     // Validate images are present
-    const emptyImages = pageImages.filter((p) => !p.image_base64);
-    if (emptyImages.length > 0) {
-      return jsonError(400, "IMAGE_PROCESSING_ERROR",
-        `Pages ${emptyImages.map((p) => p.page_number).join(",")} have no image data`);
+    if (!pageImages[0]?.image_base64) {
+      return jsonError(400, "IMAGE_PROCESSING_ERROR", "Page has no image data");
     }
 
     // ── Try models with retry logic ──
@@ -434,7 +461,7 @@ serve(async (req: any) => {
 
     for (const model of models) {
       let attempt = 0;
-      const maxAttempts = 3; // up to 2 retries per model for transient errors
+      const maxAttempts = 2; // Reduced from 3 to save resources
 
       while (attempt < maxAttempts) {
         attempt++;
@@ -453,7 +480,7 @@ serve(async (req: any) => {
 
           if (err.code === "GEMINI_RATE_LIMIT") {
             if (attempt < maxAttempts) {
-              const wait = err.retryAfterMs ?? 20_000;
+              const wait = Math.min(err.retryAfterMs ?? 20_000, 30_000); // Cap wait time
               console.warn(`[vision] Rate limit on ${model}, waiting ${wait}ms`);
               await new Promise((r) => setTimeout(r, wait));
               continue; // retry same model
@@ -463,7 +490,7 @@ serve(async (req: any) => {
 
           if (err.code === "GEMINI_API_ERROR") {
             if (attempt < maxAttempts) {
-              const backoff = 2000 * attempt;
+              const backoff = 1000 * attempt; // Reduced backoff
               console.warn(`[vision] API error on ${model} attempt ${attempt}, retrying in ${backoff}ms`);
               await new Promise((r) => setTimeout(r, backoff));
               continue;
@@ -474,7 +501,7 @@ serve(async (req: any) => {
           if (err.code === "INVALID_JSON" && attempt < maxAttempts) {
             // One JSON repair retry
             console.warn(`[vision] Invalid JSON from ${model}, retrying once`);
-            await new Promise((r) => setTimeout(r, 1000));
+            await new Promise((r) => setTimeout(r, 500));
             continue;
           }
 
@@ -494,6 +521,7 @@ serve(async (req: any) => {
     }
 
     // ── Return successful extraction ──
+    console.log(`[SUCCESS] Extracted ${result.pages[0]?.questions?.length ?? 0} questions from page ${pageImages[0].page_number}`);
     return new Response(
       JSON.stringify({ ...result, model_used: usedModel }),
       { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
@@ -501,6 +529,14 @@ serve(async (req: any) => {
 
   } catch (fatal: any) {
     console.error("[vision] Unhandled error:", fatal);
+    
+    // Check if this is the HTTP 546 RESOURCE_LIMIT error
+    if (fatal?.message?.includes("RESOURCE_LIMIT") || fatal?.message?.includes("546")) {
+      console.error("[RESOURCE_LIMIT] Edge function exhausted compute resources");
+      return jsonError(546, "RESOURCE_LIMIT_EXCEEDED", 
+        "Edge function ran out of memory processing this page. Try reducing image size or splitting into smaller batches.");
+    }
+    
     return jsonError(500, "INTERNAL_ERROR", fatal?.message ?? "Edge function crashed");
   }
 });

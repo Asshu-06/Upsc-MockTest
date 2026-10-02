@@ -4,11 +4,12 @@ import Papa from 'papaparse'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
 import { processPdfVision, retryFailedPages } from '../../services/pdfVisionService'
+import { TextPdfTab } from '../../components/admin/TextPdfTab'
 import { useApp } from '../../contexts/AppContext'
 import {
   ArrowLeft, Upload, FileText, CheckCircle2, AlertCircle, Loader2,
   Save, RefreshCw, Sparkles, ChevronDown, ChevronRight, RotateCcw,
-  Layers, Eye,
+  Layers, Eye, FileCheck,
 } from 'lucide-react'
 
 // ─── Shared: batch progress bar (same as BYOPPage) ────────────────────────────
@@ -482,7 +483,7 @@ export function ImportQuestionsPage() {
 
   const [paper, setPaper]         = useState(null)
   const [loading, setLoading]     = useState(true)
-  const [activeTab, setActiveTab] = useState('pdf')  // 'pdf' | 'csv'
+  const [activeTab, setActiveTab] = useState('text')  // 'text' | 'pdf' | 'csv'
 
   // CSV/JSON state (unchanged from original)
   const [parsedRows, setParsedRows]   = useState([])
@@ -598,6 +599,17 @@ export function ImportQuestionsPage() {
       {/* Tab switcher */}
       <div className="flex gap-2 border-b border-surface-border pb-1">
         <button
+          onClick={() => setActiveTab('text')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
+            activeTab === 'text'
+              ? 'bg-primary text-white shadow-subtle'
+              : 'bg-slate-100 text-body-secondary hover:bg-slate-200'
+          }`}
+        >
+          <FileCheck className="w-3.5 h-3.5" />
+          Text PDF (Tick Detection)
+        </button>
+        <button
           onClick={() => setActiveTab('pdf')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
             activeTab === 'pdf'
@@ -606,7 +618,7 @@ export function ImportQuestionsPage() {
           }`}
         >
           <Sparkles className="w-3.5 h-3.5" />
-          Gemini Vision (PDF)
+          Vision (Gemini AI)
         </button>
         <button
           onClick={() => setActiveTab('csv')}
@@ -620,6 +632,15 @@ export function ImportQuestionsPage() {
           CSV / JSON
         </button>
       </div>
+
+      {/* ── Text PDF tab (NEW) ── */}
+      {activeTab === 'text' && (
+        <TextPdfTab
+          paperId={paperId}
+          paperTitle={paper?.title}
+          onImportSuccess={() => setTimeout(() => navigate(`/admin/papers/${paperId}/questions`), 2000)}
+        />
+      )}
 
       {/* ── PDF Vision tab ── */}
       {activeTab === 'pdf' && (

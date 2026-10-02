@@ -29,17 +29,17 @@ import * as pdfjsLib from 'pdfjs-dist'
 import { supabase } from '../lib/supabase'
 
 // ─── Configuration ─────────────────────────────────────────────────────────────
-/** Pages sent per Gemini request. 2 is the sweet spot for TNPSC A4 papers. */
-const DEFAULT_BATCH_SIZE = 2
+/** Pages sent per Gemini request. TEMPORARILY SET TO 1 to avoid HTTP 546 RESOURCE_LIMIT. */
+const DEFAULT_BATCH_SIZE = 1
 
-/** Canvas render scale. 1.5× gives good OCR quality at manageable file size. */
-const RENDER_SCALE = 1.5
+/** Canvas render scale. REDUCED to 1.0 to avoid HTTP 546 RESOURCE_LIMIT */
+const RENDER_SCALE = 1.0
 
-/** JPEG compression quality for canvas export (0.0–1.0). */
-const JPEG_QUALITY = 0.82
+/** JPEG compression quality for canvas export (0.0–1.0). REDUCED to save memory */
+const JPEG_QUALITY = 0.70
 
 /** Max pixels on either dimension before we clamp the scale down. */
-const MAX_PX = 2400
+const MAX_PX = 1800
 
 /** Pause between batches (ms) to stay within Gemini free-tier RPM limits. */
 const INTER_BATCH_DELAY_MS = 800
@@ -86,10 +86,21 @@ async function renderPageToBase64(pdfPage) {
   canvas.height  = Math.round(viewport.height)
   const ctx      = canvas.getContext('2d')
 
+  console.log(`[pdfVision] Rendering page: ${canvas.width}×${canvas.height}px at scale ${clampedScale.toFixed(2)}`)
+
   await pdfPage.render({ canvasContext: ctx, viewport }).promise
 
   // Return full data-URI so callers can display it; we strip the prefix before hashing/sending
-  return canvas.toDataURL('image/jpeg', JPEG_QUALITY)
+  const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY)
+  const sizeKB = Math.round(dataUrl.length * 0.75 / 1024)
+  console.log(`[pdfVision] Rendered image size: ${sizeKB} KB`)
+
+  // Gemini has a ~20MB limit per image; warn if we're getting close
+  if (sizeKB > 15000) {
+    console.warn(`[pdfVision] Image size ${sizeKB} KB exceeds recommended 15MB limit — may fail`)
+  }
+
+  return dataUrl
 }
 
 // ─── Check Supabase page_hash_cache ────────────────────────────────────────────
