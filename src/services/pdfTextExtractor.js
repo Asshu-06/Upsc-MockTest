@@ -117,7 +117,15 @@ export async function extractPdfText(fileInput, onProgress = null) {
   // ── 2. Load PDF document ───────────────────────────────────────────────────
   let pdfDoc
   try {
-    pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+    pdfDoc = await pdfjsLib.getDocument({
+      data: arrayBuffer,
+      // Suppress standard font warnings
+      standardFontDataUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/standard_fonts/',
+      // Don't stop on recoverable errors
+      stopAtErrors: false,
+      // Disable font face rendering (we only need text)
+      disableFontFace: true,
+    }).promise
   } catch (err) {
     throw new Error(`PDF.js failed to load document: ${err.message}`)
   }

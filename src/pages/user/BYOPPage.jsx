@@ -441,8 +441,10 @@ export function BYOPPage() {
         throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
       }
 
+      // Check if any page has text items with content
       const hasSelectableText = extractionResult.pages.some(page => 
-        page.text && page.text.trim().length > 50
+        page.items && page.items.length > 0 && 
+        page.items.some(item => item.text && item.text.trim().length > 0)
       )
 
       if (!hasSelectableText) {
