@@ -244,69 +244,97 @@ export const pdfQuestionParser = {
     let detectedCorrectOption = null
     let explanation = ''
 
-    const optFormat1 = /[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[\(\[][A-Da-d][\)\]])|(?:Ans(?:wer)?:?)|$)/gs
-    const optFormat2 = /(?:^|\s)([A-Da-d])[\.\)]\s+(.*?)(?=(?:\s[A-Da-d][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
-    const optFormat3 = /(?:^|\s)([1-4])[\.\)]\s+(.*?)(?=(?:\s[1-4][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
-
-    let matches = [...qBody.matchAll(optFormat1)]
-    if (matches.length < 4) matches = [...qBody.matchAll(optFormat2)]
-    if (matches.length < 4) matches = [...qBody.matchAll(optFormat3)]
-
+    // TNPSC Format: Handles tick marks (☑) before options and multiple options per line
+    // Example: "☑ (A) text (B) text" or "(C) text (D) text."
+    const tnpscFormat = /[☑✓✔]?\s*[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[☑✓✔]?\s*[\(\[][A-Da-d][\)\]])|$)/gs
+    
+    let matches = [...qBody.matchAll(tnpscFormat)]
+    
+    // If TNPSC format found at least 4 options, use it
     if (matches.length >= 4) {
       const firstOptPos = matches[0].index
       questionText = qBody.substring(0, firstOptPos).trim()
 
       matches.forEach((m) => {
         let key = m[1].toUpperCase()
-        if (key === '1') key = 'A'
-        if (key === '2') key = 'B'
-        if (key === '3') key = 'C'
-        if (key === '4') key = 'D'
+        let val = m[2].trim()
+        
+        // Clean up: remove trailing punctuation that might belong to next option
+        val = val.replace(/\s*[\(\[]?[A-Da-d][\)\]].*$/, '').trim()
+        val = val.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 
-        const val = m[2].replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
-
-        if (key === 'A') option_a = val
-        if (key === 'B') option_b = val
-        if (key === 'C') option_c = val
-        if (key === 'D') option_d = val
+        if (key === 'A' && !option_a) option_a = val
+        if (key === 'B' && !option_b) option_b = val
+        if (key === 'C' && !option_c) option_c = val
+        if (key === 'D' && !option_d) option_d = val
       })
     } else {
-      const lines = qBody.split('\n')
-      const qTextLines = []
-      let currentOptKey = null
-      const optBuffers = { A: '', B: '', C: '', D: '' }
+      // Fallback to original UPSC formats
+      const optFormat1 = /[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[\(\[][A-Da-d][\)\]])|(?:Ans(?:wer)?:?)|$)/gs
+      const optFormat2 = /(?:^|\s)([A-Da-d])[\.\)]\s+(.*?)(?=(?:\s[A-Da-d][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
+      const optFormat3 = /(?:^|\s)([1-4])[\.\)]\s+(.*?)(?=(?:\s[1-4][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
 
-      lines.forEach((line) => {
-        const trimmed = line.trim()
-        const optLineMatch = trimmed.match(/^[\(\[]?([A-Da-d1-4])[\)\.\:]\s*(.*)/)
+      matches = [...qBody.matchAll(optFormat1)]
+      if (matches.length < 4) matches = [...qBody.matchAll(optFormat2)]
+      if (matches.length < 4) matches = [...qBody.matchAll(optFormat3)]
 
-        if (optLineMatch) {
-          let k = optLineMatch[1].toUpperCase()
-          if (k === '1') k = 'A'
-          if (k === '2') k = 'B'
-          if (k === '3') k = 'C'
-          if (k === '4') k = 'D'
+      if (matches.length >= 4) {
+        const firstOptPos = matches[0].index
+        questionText = qBody.substring(0, firstOptPos).trim()
 
-          if (['A', 'B', 'C', 'D'].includes(k)) {
-            currentOptKey = k
-            optBuffers[k] = optLineMatch[2].trim()
-            return
+        matches.forEach((m) => {
+          let key = m[1].toUpperCase()
+          if (key === '1') key = 'A'
+          if (key === '2') key = 'B'
+          if (key === '3') key = 'C'
+          if (key === '4') key = 'D'
+
+          const val = m[2].replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
+
+          if (key === 'A') option_a = val
+          if (key === 'B') option_b = val
+          if (key === 'C') option_c = val
+          if (key === 'D') option_d = val
+        })
+      } else {
+        // Line-by-line fallback
+        const lines = qBody.split('\n')
+        const qTextLines = []
+        let currentOptKey = null
+        const optBuffers = { A: '', B: '', C: '', D: '' }
+
+        lines.forEach((line) => {
+          const trimmed = line.trim()
+          const optLineMatch = trimmed.match(/^[☑✓✔]?\s*[\(\[]?([A-Da-d1-4])[\)\.\:]\s*(.*)/)
+
+          if (optLineMatch) {
+            let k = optLineMatch[1].toUpperCase()
+            if (k === '1') k = 'A'
+            if (k === '2') k = 'B'
+            if (k === '3') k = 'C'
+            if (k === '4') k = 'D'
+
+            if (['A', 'B', 'C', 'D'].includes(k)) {
+              currentOptKey = k
+              optBuffers[k] = optLineMatch[2].trim()
+              return
+            }
           }
-        }
 
-        if (currentOptKey) {
-          optBuffers[currentOptKey] += ' ' + trimmed
-        } else {
-          qTextLines.push(line)
-        }
-      })
+          if (currentOptKey) {
+            optBuffers[currentOptKey] += ' ' + trimmed
+          } else {
+            qTextLines.push(line)
+          }
+        })
 
-      if (optBuffers.A && optBuffers.B && optBuffers.C && optBuffers.D) {
-        questionText = qTextLines.join('\n').trim()
-        option_a = optBuffers.A.trim()
-        option_b = optBuffers.B.trim()
-        option_c = optBuffers.C.trim()
-        option_d = optBuffers.D.trim()
+        if (optBuffers.A && optBuffers.B && optBuffers.C && optBuffers.D) {
+          questionText = qTextLines.join('\n').trim()
+          option_a = optBuffers.A.trim()
+          option_b = optBuffers.B.trim()
+          option_c = optBuffers.C.trim()
+          option_d = optBuffers.D.trim()
+        }
       }
     }
 
@@ -315,8 +343,16 @@ export const pdfQuestionParser = {
       .replace(/\s+/g, ' ')
       .trim()
 
+    // Detect tick marks as correct answer indicator
+    const tickMarkRegex = /[☑✓✔]\s*[\(\[]?([A-Da-d])[\)\]]?/
+    const tickMatch = qBody.match(tickMarkRegex)
+    if (tickMatch) {
+      detectedCorrectOption = tickMatch[1].toUpperCase()
+    }
+
+    // Also check for explicit "Answer:" notation
     const ansMatch = qBody.match(/(?:Ans(?:wer)?|Correct Option)\s*[\:\-]?\s*[\(\[]?([A-Da-d])[\)\]]?/i)
-    if (ansMatch) {
+    if (ansMatch && !detectedCorrectOption) {
       detectedCorrectOption = ansMatch[1].toUpperCase()
     }
 
