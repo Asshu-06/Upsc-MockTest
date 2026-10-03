@@ -585,7 +585,7 @@ export function BYOPPage() {
         reason: 'Intentional limit - full questions saved when user confirms extraction'
       })
       
-      // Sanitize Unicode recursively to remove unpaired surrogates
+      // Sanitize Unicode recursively to remove unpaired surrogates and null bytes
       const sanitizeUnicode = (value) => {
         if (typeof value !== 'string') {
           if (Array.isArray(value)) return value.map(sanitizeUnicode)
@@ -597,10 +597,16 @@ export function BYOPPage() {
           return value
         }
         
-        // Remove unpaired surrogates
+        // Remove null bytes and unpaired surrogates
         let result = ''
         for (let i = 0; i < value.length; i++) {
           const code = value.charCodeAt(i)
+          
+          // Skip null bytes (U+0000) - PostgreSQL TEXT columns reject these
+          if (code === 0x0000) {
+            continue
+          }
+          
           if (code >= 0xD800 && code <= 0xDBFF) {
             // High surrogate - check if followed by low surrogate
             const next = value.charCodeAt(i + 1)
@@ -699,8 +705,8 @@ export function BYOPPage() {
         throw new Error(`JSON serialization failed: ${serErr.message}`)
       }
       
-      // Prepare full payload
-      const storagePayload = {
+      // Prepare full payload with sanitization applied to ALL fields
+      const storagePayload = sanitizeUnicode({
         processing_status: newStatus,
         total_pages: extractionResult.pages.length,
         processed_pages: extractionResult.pages.length,
@@ -710,7 +716,7 @@ export function BYOPPage() {
         notes: needsReview
           ? `${questions.length} questions extracted. ${validCount} ready, ${questions.length - validCount} need review.`
           : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
-      }
+      })
       
       console.log('[BYOP] STORAGE PAYLOAD DEBUG:', {
         processingJobId,
@@ -721,7 +727,9 @@ export function BYOPPage() {
         needsReview: questions.length - validCount,
         payloadKeys: Object.keys(storagePayload),
         questions_json_type: typeof storagePayload.questions_json,
-        questions_json_length: storagePayload.questions_json?.length
+        questions_json_length: storagePayload.questions_json?.length,
+        notes_length: storagePayload.notes?.length,
+        notes_hasNullBytes: /\u0000/.test(storagePayload.notes || '')
       })
       
       // Field-by-field diagnostic test
