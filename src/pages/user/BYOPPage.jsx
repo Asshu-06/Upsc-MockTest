@@ -573,17 +573,93 @@ export function BYOPPage() {
         needsReview: questions.filter(q => q.parser_status === 'needs_review').length
       })
 
-      await byopService.update(paper.id, user.id, {
+      console.log('[BYOP] Storing extraction result...')
+      
+      // Prepare payload with Unicode sanitization
+      const questionsPreview = questions.slice(0, 20)
+      
+      // Sanitize Unicode recursively to remove unpaired surrogates
+      const sanitizeUnicode = (value) => {
+        if (typeof value !== 'string') {
+          if (Array.isArray(value)) return value.map(sanitizeUnicode)
+          if (value && typeof value === 'object') {
+            return Object.fromEntries(
+              Object.entries(value).map(([k, v]) => [k, sanitizeUnicode(v)])
+            )
+          }
+          return value
+        }
+        
+        // Remove unpaired surrogates
+        let result = ''
+        for (let i = 0; i < value.length; i++) {
+          const code = value.charCodeAt(i)
+          if (code >= 0xD800 && code <= 0xDBFF) {
+            // High surrogate - check if followed by low surrogate
+            const next = value.charCodeAt(i + 1)
+            if (next >= 0xDC00 && next <= 0xDFFF) {
+              result += value[i] + value[i + 1]
+              i++
+            } else {
+              // Unpaired high surrogate - replace with replacement char
+              result += '\uFFFD'
+            }
+          } else if (code >= 0xDC00 && code <= 0xDFFF) {
+            // Unpaired low surrogate - replace
+            result += '\uFFFD'
+          } else {
+            result += value[i]
+          }
+        }
+        return result
+      }
+      
+      const sanitizedQuestions = sanitizeUnicode(questionsPreview)
+      
+      // Test JSON serialization BEFORE Supabase call
+      let serialized
+      try {
+        serialized = JSON.stringify(sanitizedQuestions)
+        const bytes = new TextEncoder().encode(serialized).length
+        console.log('[BYOP] JSON serialization successful:', {
+          processingJobId,
+          paperId: paper.id,
+          fileName: paper.file_name,
+          questionsCount: sanitizedQuestions.length,
+          payloadBytes: bytes
+        })
+      } catch (serErr) {
+        console.error('[BYOP] JSON.stringify FAILED:', serErr)
+        throw new Error(`JSON serialization failed: ${serErr.message}`)
+      }
+      
+      // Prepare full payload
+      const storagePayload = {
         processing_status: newStatus,
         total_pages: extractionResult.pages.length,
         processed_pages: extractionResult.pages.length,
         extracted_count: questions.length,
-        questions_json: questions.slice(0, 20), // preview
+        questions_json: sanitizedQuestions,
         batch_progress_json: [],
         notes: needsReview
           ? `${questions.length} questions extracted. ${validCount} ready, ${questions.length - validCount} need review.`
           : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
+      }
+      
+      console.log('[BYOP] STORAGE PAYLOAD DEBUG:', {
+        processingJobId,
+        paperId: paper.id,
+        fileName: paper.file_name,
+        totalQuestions: questions.length,
+        validQuestions: validCount,
+        needsReview: questions.length - validCount,
+        payloadKeys: Object.keys(storagePayload),
+        questions_json_type: typeof storagePayload.questions_json,
+        questions_json_length: storagePayload.questions_json?.length
       })
+      
+      // Supabase update
+      await byopService.update(paper.id, user.id, storagePayload)
 
       setPapers(prev => prev.map(p => p.id === paper.id
         ? { ...p, processing_status: newStatus, extracted_count: questions.length }
