@@ -394,6 +394,17 @@ export function BYOPPage() {
 
   // ── Process (run full pipeline) ────────────────────────────────────────────
   async function handleProcess(paper) {
+    // Generate unique processing job ID
+    const processingJobId = `${paper.id}-${Date.now()}`
+    
+    console.log('[BYOP] ═══ PROCESS START ═══')
+    console.log('[BYOP] processingJobId:', processingJobId)
+    console.log('[BYOP] paperId:', paper.id)
+    console.log('[BYOP] fileName:', paper.file_name)
+    console.log('[BYOP] fileSize:', paper.file_size_bytes)
+    console.log('[BYOP] storagePath:', paper.storage_path)
+    console.log('[BYOP] timestamp:', new Date().toISOString())
+
     setActiveId(paper.id)
     setProgress(null)
     setResult(null)
@@ -412,7 +423,22 @@ export function BYOPPage() {
     try {
       const signedUrl  = await byopService.getSignedUrl(paper.storage_path)
 
-      // Step 1: Extract text from PDF using PDF.js
+      // Step 1: Fetch PDF blob
+      console.log('[BYOP] Fetching PDF from storage...')
+      const response = await fetch(signedUrl)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`)
+      }
+      const pdfBlob = await response.blob()
+      
+      console.log('[BYOP] PDF Blob fetched:', {
+        processingJobId,
+        fileName: paper.file_name,
+        blobSize: pdfBlob.size,
+        blobType: pdfBlob.type
+      })
+
+      // Step 2: Extract text from PDF using PDF.js
       setProgress({ 
         stage: 'extracting', 
         currentPage: 0, 
@@ -421,25 +447,37 @@ export function BYOPPage() {
         questionsFound: 0,
         statusText: 'Extracting text from PDF...'
       })
-
-      const pdfBlob = await fetch(signedUrl).then(r => r.blob())
       
       let extractionResult
       try {
-        extractionResult = await extractPdfText(pdfBlob, {
-          onProgress: (current, total) => {
-            setProgress({
-              stage: 'extracting',
-              currentPage: current,
-              totalPages: total,
-              pagesProcessed: current,
-              questionsFound: 0,
-              statusText: `Extracting text from page ${current} of ${total}...`
-            })
-          }
+        console.log('[BYOP] Starting PDF.js extraction...')
+        extractionResult = await extractPdfText(pdfBlob, (current, total) => {
+          console.log(`[BYOP] Extraction progress: page ${current}/${total} (job: ${processingJobId})`)
+          setProgress({
+            stage: 'extracting',
+            currentPage: current,
+            totalPages: total,
+            pagesProcessed: current,
+            questionsFound: 0,
+            statusText: `Extracting text from page ${current} of ${total}...`
+          })
+        })
+        
+        console.log('[BYOP] PDF.js extraction complete:', {
+          processingJobId,
+          fileName: paper.file_name,
+          totalPages: extractionResult.totalPages,
+          hasSelectableText: extractionResult.hasSelectableText,
+          extractedTextLength: extractionResult.pages?.reduce((sum, p) => 
+            sum + p.items.reduce((s, i) => s + (i.text?.length || 0), 0), 0)
         })
       } catch (err) {
-        // Show real PDF.js error instead of generic message
+        console.error('[BYOP] PDF.js extraction error:', {
+          processingJobId,
+          fileName: paper.file_name,
+          error: err.message,
+          stack: err.stack
+        })
         const errorMsg = err.message || 'Unknown PDF extraction error'
         throw new Error(`PDF text extraction failed: ${errorMsg}`)
       }
@@ -448,6 +486,15 @@ export function BYOPPage() {
       if (!extractionResult.pages || extractionResult.pages.length === 0) {
         throw new Error('PDF contains no pages or failed to extract page data.')
       }
+
+      // Verify page count
+      console.log('[BYOP] PDF IDENTITY CHECK:', {
+        processingJobId,
+        fileName: paper.file_name,
+        expectedFileName: paper.file_name,
+        extractedPages: extractionResult.totalPages,
+        hasSelectableText: extractionResult.hasSelectableText
+      })
 
       // Check if any page has text items with content
       const hasSelectableText = extractionResult.pages.some(page => 
@@ -459,7 +506,8 @@ export function BYOPPage() {
         throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
       }
 
-      // Step 2: Parse MCQ questions from extracted text
+      // Step 3: Parse MCQ questions from extracted text
+      console.log('[BYOP] Starting MCQ parsing...')
       setProgress({ 
         stage: 'parsing', 
         currentPage: extractionResult.pages.length,
@@ -469,10 +517,24 @@ export function BYOPPage() {
         statusText: 'Parsing questions from text...'
       })
 
-      const parseResult = parseMcqQuestions(extractionResult)
+      const parseResult = await parseMcqQuestions(extractionResult)
       const questions = parseResult.questions || []
 
+      console.log('[BYOP] MCQ parsing complete:', {
+        processingJobId,
+        fileName: paper.file_name,
+        totalQuestions: questions.length,
+        validQuestions: questions.filter(q => q.parser_status === 'ready').length,
+        needsReview: questions.filter(q => q.parser_status === 'needs_review').length
+      })
+
       if (questions.length === 0) {
+        console.warn('[BYOP] No questions extracted:', {
+          processingJobId,
+          fileName: paper.file_name,
+          totalPages: extractionResult.totalPages,
+          hasSelectableText: extractionResult.hasSelectableText
+        })
         await byopService.update(paper.id, user.id, {
           processing_status: 'failed',
           notes: 'No questions could be extracted. The PDF may not contain MCQ questions in a recognizable format.',
@@ -483,11 +545,15 @@ export function BYOPPage() {
           : p
         ))
         toast.error('No questions found in this PDF.')
+        console.log('[BYOP] ═══ PROCESS END (FAILED - NO QUESTIONS) ═══', { processingJobId })
         return
       }
 
-      // Store result
+      // Store result with processingJobId
+      console.log('[BYOP] Storing extraction result...')
       setResult({
+        processingJobId,
+        fileName: paper.file_name,
         questions,
         totalQuestions: questions.length,
         totalPages: extractionResult.pages.length,
@@ -495,8 +561,17 @@ export function BYOPPage() {
       })
 
       // Determine status based on validation
-      const needsReview = questions.some(q => q.status === 'needs_review')
+      const needsReview = questions.some(q => q.parser_status === 'needs_review')
+      const validCount = questions.filter(q => q.parser_status === 'ready').length
       const newStatus = needsReview ? 'review_required' : 'extracted'
+
+      console.log('[BYOP] Final status:', {
+        processingJobId,
+        status: newStatus,
+        totalQuestions: questions.length,
+        validQuestions: validCount,
+        needsReview: questions.filter(q => q.parser_status === 'needs_review').length
+      })
 
       await byopService.update(paper.id, user.id, {
         processing_status: newStatus,
@@ -506,7 +581,7 @@ export function BYOPPage() {
         questions_json: questions.slice(0, 20), // preview
         batch_progress_json: [],
         notes: needsReview
-          ? `${questions.length} questions extracted. Some questions need review.`
+          ? `${questions.length} questions extracted. ${validCount} ready, ${questions.length - validCount} need review.`
           : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
       })
 
@@ -516,10 +591,23 @@ export function BYOPPage() {
       ))
 
       setShowReview(true)
-      toast.success(`${questions.length} questions extracted!${needsReview ? ' Some questions need review.' : ''}`)
+      toast.success(`${questions.length} questions extracted!${needsReview ? ` ${validCount} ready, ${questions.length - validCount} need review.` : ''}`)
+      
+      console.log('[BYOP] ═══ PROCESS END (SUCCESS) ═══', { 
+        processingJobId,
+        fileName: paper.file_name,
+        totalQuestions: questions.length,
+        validQuestions: validCount
+      })
 
     } catch (err) {
       const msg = err.message ?? 'Extraction failed'
+      console.error('[BYOP] ═══ PROCESS END (ERROR) ═══', {
+        processingJobId: processingJobId || 'unknown',
+        fileName: paper.file_name,
+        error: msg,
+        stack: err.stack
+      })
       await byopService.update(paper.id, user.id, {
         processing_status: 'failed',
         notes: msg,
