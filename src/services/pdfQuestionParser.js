@@ -87,16 +87,17 @@ export const pdfQuestionParser = {
     console.log('[PDF.js] Total pages:', totalPages)
     console.log('[PDF.js] Total text length:', totalChars, 'characters')
 
-    // Check if scanned PDF
-    if (totalChars === 0 || totalChars < totalPages * 25) {
-      console.warn('[PDF.js] No selectable text detected')
+    // Check if scanned PDF (improved detection)
+    const avgCharsPerPage = totalChars / totalPages
+    if (totalChars < 100 || avgCharsPerPage < 20) {
+      console.warn('[PDF.js] Insufficient selectable text detected')
       return {
         error: "This PDF appears to be scanned/image-based and contains no selectable text. Please upload a PDF with selectable text.",
         totalPages,
         totalQuestions: 0,
         questions: [],
         extractedTextLength: totalChars,
-        warnings: ["No selectable text found"]
+        warnings: ["Insufficient selectable text found"]
       }
     }
 
@@ -109,6 +110,7 @@ export const pdfQuestionParser = {
 
     console.log('[pdfMcqParser] Total questions:', questions.length)
     console.log('[pdfMcqParser] Valid questions:', questions.filter(q => q.isValid).length)
+    console.log('[pdfMcqParser] Needs review:', questions.filter(q => q.parserStatus === 'needs_review').length)
 
     return {
       totalPages,
@@ -117,6 +119,7 @@ export const pdfQuestionParser = {
       totalQuestions: questions.length,
       validQuestionsCount: questions.filter(q => q.isValid).length,
       incompleteQuestionsCount: questions.filter(q => !q.isValid).length,
+      needsReviewCount: questions.filter(q => q.parserStatus === 'needs_review').length,
       answerKeyFound,
       warnings
     }
@@ -228,9 +231,10 @@ export const pdfQuestionParser = {
         option_d: parsed.option_d,
         correct_option: detectedAnswer,
         explanation: parsed.explanation || '',
-        isValid: errors.length === 0,
+        isValid: errors.length === 0 && parsed.parserStatus === 'ready',
         errors,
-        questionType: parsed.questionType
+        questionType: parsed.questionType,
+        parserStatus: parsed.parserStatus
       })
     }
 
@@ -245,6 +249,7 @@ export const pdfQuestionParser = {
 
   /**
    * Parse options from question body - LANGUAGE AGNOSTIC
+   * CRITICAL: Does NOT automatically convert 1-4 to A-D (matching table protection)
    */
   parseOptionsFromBody(qBody, qNum) {
     let questionText = qBody
@@ -255,49 +260,38 @@ export const pdfQuestionParser = {
     let detectedCorrectOption = null
     let explanation = ''
     let questionType = 'normal'
+    let parserStatus = 'ready'
 
-    // Debug logging for specific questions
-    if (qNum >= 100 && qNum <= 105) {
+    // Debug logging for test questions
+    if (qNum >= 100 && qNum <= 200) {
+      console.log(`\n[Q${qNum}] ==================`)
       console.log(`[Q${qNum}] Body length:`, qBody.length)
-      console.log(`[Q${qNum}] First 200 chars:`, qBody.substring(0, 200))
+      console.log(`[Q${qNum}] First 400 chars:`, qBody.substring(0, 400))
     }
 
-    // DETECT OPTION MARKERS - Try multiple formats
-    // Format 1: (A) text (B) text (C) text (D) text
-    const format1 = /[☑✓✔]?\s*[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[☑✓✔]?\s*[\(\[][A-Da-d][\)\]])|$)/gs
-    let matches = [...qBody.matchAll(format1)]
+    // STEP 1: Try to find actual A-D options (PRIMARY FORMAT - most reliable)
+    // Format 1: (A) text (B) text (C) text (D) text with optional tick
+    const formatAD1 = /[☑✓✔]?\s*[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[☑✓✔]?\s*[\(\[][A-Da-d][\)\]])|$)/gs
+    let adMatches = [...qBody.matchAll(formatAD1)]
 
     // Format 2: A) text B) text C) text D) text
-    if (matches.length < 4) {
-      const format2 = /(?:^|\n)\s*([A-Da-d])[\.\)]\s+(.*?)(?=(?:\n\s*[A-Da-d][\.\)])|$)/gs
-      matches = [...qBody.matchAll(format2)]
+    if (adMatches.length < 4) {
+      const formatAD2 = /(?:^|\n)\s*[☑✓✔]?\s*([A-Da-d])[\.\)]\s+(.*?)(?=(?:\n\s*[☑✓✔]?\s*[A-Da-d][\.\)])|$)/gs
+      adMatches = [...qBody.matchAll(formatAD2)]
     }
 
-    // Format 3: 1) text 2) text 3) text 4) text (for options)
-    if (matches.length < 4) {
-      const format3 = /(?:^|\n)\s*([1-4])[\.\)]\s+(.*?)(?=(?:\n\s*[1-4][\.\)])|$)/gs
-      matches = [...qBody.matchAll(format3)]
-    }
-
-    // If we found 4+ matches, extract them
-    if (matches.length >= 4) {
-      const firstOptIndex = matches[0].index
+    // If we found 4+ A-D matches, use them (PREFERRED)
+    if (adMatches.length >= 4) {
+      const firstOptIndex = adMatches[0].index
       questionText = qBody.substring(0, firstOptIndex).trim()
 
       // Take only first 4 matches
-      matches.slice(0, 4).forEach((m, idx) => {
+      adMatches.slice(0, 4).forEach((m, idx) => {
         let key = m[1].toUpperCase()
-        
-        // Convert 1234 to ABCD if needed
-        if (key === '1') key = 'A'
-        if (key === '2') key = 'B'
-        if (key === '3') key = 'C'
-        if (key === '4') key = 'D'
-
         let val = m[2].trim()
         
         // Clean up: remove next option marker if captured
-        val = val.replace(/[\(\[]?[A-Da-d1-4][\)\]].*$/, '').trim()
+        val = val.replace(/[\(\[]?[A-Da-d][\)\]].*$/, '').trim()
         val = val.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 
         if (key === 'A' && !option_a) option_a = val
@@ -306,15 +300,22 @@ export const pdfQuestionParser = {
         if (key === 'D' && !option_d) option_d = val
       })
 
-      if (qNum >= 100 && qNum <= 105) {
-        console.log(`[Q${qNum}] Extracted A:`, option_a?.substring(0, 80))
-        console.log(`[Q${qNum}] Extracted B:`, option_b?.substring(0, 80))
-        console.log(`[Q${qNum}] Extracted C:`, option_c?.substring(0, 80))
-        console.log(`[Q${qNum}] Extracted D:`, option_d?.substring(0, 80))
+      if (qNum >= 100 && qNum <= 200) {
+        console.log(`[Q${qNum}] Found A-D format (4+ matches)`)
+        console.log(`[Q${qNum}] A:`, option_a?.substring(0, 120))
+        console.log(`[Q${qNum}] B:`, option_b?.substring(0, 120))
+        console.log(`[Q${qNum}] C:`, option_c?.substring(0, 120))
+        console.log(`[Q${qNum}] D:`, option_d?.substring(0, 120))
+      }
+    } else if (adMatches.length > 0 && adMatches.length < 4) {
+      // Found some A-D but not 4 - ambiguous
+      parserStatus = 'needs_review'
+      if (qNum >= 100 && qNum <= 200) {
+        console.log(`[Q${qNum}] WARNING: Found only ${adMatches.length} A-D options`)
       }
     }
 
-    // Fallback: Line-by-line parsing
+    // STEP 2: Fallback - Line-by-line parsing (only for A-D markers, NOT 1-4)
     if (!option_a || !option_b || !option_c || !option_d) {
       const lines = qBody.split('\n')
       const qTextLines = []
@@ -323,15 +324,11 @@ export const pdfQuestionParser = {
 
       lines.forEach(line => {
         const trimmed = line.trim()
-        // Match option start: (A), A), A., 1), etc.
-        const optMatch = trimmed.match(/^[☑✓✔]?\s*[\(\[]?([A-Da-d1-4])[\)\.\:]/)
+        // Match ONLY A-D markers (NOT 1-4 to avoid matching table content)
+        const optMatch = trimmed.match(/^[☑✓✔]?\s*[\(\[]?([A-Da-d])[\)\.\:]/)
 
         if (optMatch) {
-          let k = optMatch[1].toUpperCase()
-          if (k === '1') k = 'A'
-          if (k === '2') k = 'B'
-          if (k === '3') k = 'C'
-          if (k === '4') k = 'D'
+          const k = optMatch[1].toUpperCase()
 
           if (['A', 'B', 'C', 'D'].includes(k)) {
             currentOpt = k
@@ -347,12 +344,26 @@ export const pdfQuestionParser = {
         }
       })
 
-      if (!option_a) option_a = optBuffers.A.trim()
-      if (!option_b) option_b = optBuffers.B.trim()
-      if (!option_c) option_c = optBuffers.C.trim()
-      if (!option_d) option_d = optBuffers.D.trim()
-      if (!questionText || questionText === qBody) {
-        questionText = qTextLines.join('\n').trim()
+      if (optBuffers.A || optBuffers.B || optBuffers.C || optBuffers.D) {
+        if (!option_a) option_a = optBuffers.A.trim()
+        if (!option_b) option_b = optBuffers.B.trim()
+        if (!option_c) option_c = optBuffers.C.trim()
+        if (!option_d) option_d = optBuffers.D.trim()
+        if (!questionText || questionText === qBody) {
+          questionText = qTextLines.join('\n').trim()
+        }
+
+        if (qNum >= 100 && qNum <= 200) {
+          console.log(`[Q${qNum}] Used line-by-line fallback`)
+        }
+      }
+    }
+
+    // Validate we have all 4 options
+    if (!option_a || !option_b || !option_c || !option_d) {
+      parserStatus = 'needs_review'
+      if (qNum >= 100 && qNum <= 200) {
+        console.log(`[Q${qNum}] WARNING: Missing options - A:${!!option_a} B:${!!option_b} C:${!!option_c} D:${!!option_d}`)
       }
     }
 
@@ -367,7 +378,7 @@ export const pdfQuestionParser = {
     const tickMatch = qBody.match(tickPattern)
     if (tickMatch) {
       detectedCorrectOption = tickMatch[1].toUpperCase()
-      if (qNum >= 100 && qNum <= 105) {
+      if (qNum >= 100 && qNum <= 200) {
         console.log(`[Q${qNum}] Tick detected:`, detectedCorrectOption)
       }
     }
@@ -378,6 +389,11 @@ export const pdfQuestionParser = {
       detectedCorrectOption = ansMatch[1].toUpperCase()
     }
 
+    if (qNum >= 100 && qNum <= 200) {
+      console.log(`[Q${qNum}] Status: ${parserStatus}`)
+      console.log(`[Q${qNum}] Correct: ${detectedCorrectOption || 'none'}`)
+    }
+
     return {
       questionText,
       option_a,
@@ -386,7 +402,8 @@ export const pdfQuestionParser = {
       option_d,
       detectedCorrectOption,
       explanation,
-      questionType
+      questionType,
+      parserStatus
     }
   },
 
