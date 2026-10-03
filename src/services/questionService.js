@@ -78,6 +78,16 @@ export const questionService = {
       throw new Error('No questions provided for import.')
     }
 
+    // Helper: Sanitize database text - remove ONLY null bytes (U+0000)
+    const sanitizeDatabaseText = (value) => {
+      if (typeof value !== 'string') return value
+      const cleaned = value.replace(/\u0000/g, '')
+      if (cleaned !== value) {
+        console.warn('[UNICODE-TRACE][DATABASE-SANITIZE] Removed null bytes from field')
+      }
+      return cleaned
+    }
+
     // 1. If replaceExisting is true, delete existing questions for paper_id
     if (replaceExisting) {
       const { error: delErr } = await supabase
@@ -89,7 +99,7 @@ export const questionService = {
     }
 
     // 2. Map frontend fields to actual Supabase database schema
-    const formattedList = questionsList.map((q) => {
+    const formattedList = questionsList.map((q, idx) => {
       const opt = q.correct_option || q.marked_answer ? String(q.correct_option || q.marked_answer).toUpperCase().trim() : null
       const validOpt = ['A', 'B', 'C', 'D'].includes(opt) ? opt : null
 
@@ -108,17 +118,29 @@ export const questionService = {
         })
       }
 
-      return {
+      // CRITICAL: Sanitize all text fields to remove null bytes before database insert
+      const sanitized = {
         paper_id: paperId,
         question_number: parseInt(q.question_number, 10),
-        question_text: q.question_text || '',
-        option_a: optA,
-        option_b: optB,
-        option_c: optC,
-        option_d: optD,
+        question_text: sanitizeDatabaseText(q.question_text || ''),
+        option_a: sanitizeDatabaseText(optA),
+        option_b: sanitizeDatabaseText(optB),
+        option_c: sanitizeDatabaseText(optC),
+        option_d: sanitizeDatabaseText(optD),
         correct_option: validOpt,
-        explanation: q.explanation || q.extraction_notes || null
+        explanation: sanitizeDatabaseText(q.explanation || q.extraction_notes || null)
       }
+
+      // Log null byte removal for first few questions
+      if (idx < 3) {
+        const hadNullBytes = [q.question_text, optA, optB, optC, optD, q.explanation]
+          .filter(v => v && typeof v === 'string' && v.includes('\u0000')).length
+        if (hadNullBytes > 0) {
+          console.log(`[UNICODE-TRACE][DATABASE-PAYLOAD] Q${sanitized.question_number} nullByteFields=${hadNullBytes} (sanitized)`)
+        }
+      }
+
+      return sanitized
     })
 
     // Deduplicate formatted list by question_number to ensure PostgreSQL ON CONFLICT DO UPDATE never encounters duplicate keys in a single batch
@@ -133,6 +155,9 @@ export const questionService = {
     // 3. Batch insert in chunks of 25 items to handle large question sets safely
     const BATCH_SIZE = 25
     const insertedRecords = []
+    let totalInserted = 0
+
+    console.log(`[questionService] Starting batch insert: ${uniqueList.length} questions, paperId=${paperId}`)
 
     for (let i = 0; i < uniqueList.length; i += BATCH_SIZE) {
       const batch = uniqueList.slice(i, i + BATCH_SIZE)
@@ -143,12 +168,26 @@ export const questionService = {
         .select()
 
       if (error) {
-        console.error(`Batch insert error at index ${i}:`, error)
+        console.error(`[questionService] Batch insert error at index ${i}:`, {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        })
         throw new Error(`Database import failed at question batch (${i + 1}-${i + batch.length}): ${error.message}`)
       }
 
-      if (data) insertedRecords.push(...data)
+      if (data) {
+        insertedRecords.push(...data)
+        totalInserted += data.length
+      }
     }
+
+    console.log(`[questionService] QUESTIONS INSERT SUCCESS:`, {
+      paperId,
+      insertedCount: totalInserted,
+      totalBatches: Math.ceil(uniqueList.length / BATCH_SIZE)
+    })
 
     // 4. Update total_questions count on papers table
     await this.updatePaperTotalQuestions(paperId)

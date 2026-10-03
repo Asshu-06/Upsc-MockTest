@@ -568,7 +568,8 @@ export function BYOPPage() {
       console.log('[BYOP] Final status:', {
         processingJobId,
         status: newStatus,
-        totalQuestions: questions.length,
+        questionCandidates: questions.length,
+        completeQuestions: parseResult.completeQuestions || 0,
         validQuestions: validCount,
         needsReview: questions.filter(q => q.parser_status === 'needs_review').length
       })

@@ -109,7 +109,23 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
     const { pageNumber, items } = pageData
     const pageTextLength = items.reduce((sum, i) => sum + (i.text?.length || 0), 0)
 
+    // UNICODE TRACE: Check for null bytes in raw PDF.js items
+    const nullByteCount = items.filter(item => item.text?.includes('\u0000')).length
+    if (nullByteCount > 0) {
+      console.warn(`[UNICODE-TRACE][PDFJS] page=${pageNumber} nullByteItems=${nullByteCount}`)
+    }
+
     console.log(`[mcqParser] [${processingJobId}] page=${pageNumber}/${totalPages} items=${items.length} textLen=${pageTextLength}`)
+
+    // For page 9 (Q12/Q13 area), log raw PDF.js items
+    if (pageNumber === 9) {
+      console.log(`[PDFJS][RAW ITEMS] Page 9:`)
+      items.slice(0, 50).forEach((item, idx) => {
+        if (item.text?.trim()) {
+          console.log(`  [${idx}] str="${item.text}" x=${item.x?.toFixed(1)} y=${item.y?.toFixed(1)}`)
+        }
+      })
+    }
 
     // Group into lines using coordinates
     const lines = groupItemsByLine(items, 3) // 3px Y-tolerance
@@ -129,6 +145,14 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         // Log first few questions
         if (questionCount <= 5) {
           console.log(`[mcqParser] [${processingJobId}] Q${questionMatch.number} detected: "${questionMatch.remainder.substring(0, 60)}..."`)
+        }
+        
+        // Deep trace for Q13
+        if (questionMatch.number === 13) {
+          console.log(`[TRACE Q13] ═══ QUESTION 13 DETECTED ═══`)
+          console.log(`[TRACE Q13] lineIdx=${lineIdx} lineText="${lineText}"`)
+          console.log(`[TRACE Q13] questionMatch.remainder="${questionMatch.remainder}"`)
+          console.log(`[TRACE Q13] lineItems:`, lineItems.map(i => ({ text: i.text, x: i.x, y: i.y })))
         }
 
         // Save previous question
@@ -160,6 +184,11 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         const hasTick = detectTickMark(lineText)
         const cleanText = removeTickMarks(remainder)
 
+        // Trace for Q13
+        if (currentQuestion.question_number === 13) {
+          console.log(`[TRACE Q13] Option detected: ${label} = "${cleanText.substring(0, 60)}" hasTick=${hasTick}`)
+        }
+
         // Record as candidate
         currentQuestion.option_candidates.push({
           label: label.toUpperCase(),
@@ -182,6 +211,11 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
           // Likely continuation of last option
           lastCandidate.text = (lastCandidate.text + ' ' + lineText).trim()
           
+          // Trace for Q13
+          if (currentQuestion.question_number === 13) {
+            console.log(`[TRACE Q13] Multiline continuation for ${lastCandidate.label}: "${lineText.substring(0, 40)}"`)
+          }
+          
           // Check for tick on continuation line
           if (detectTickMark(lineText)) {
             lastCandidate.hasTick = true
@@ -190,6 +224,11 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         } else {
           // Belongs to question text
           currentQuestion.question_text = (currentQuestion.question_text + ' ' + lineText).trim()
+          
+          // Trace for Q13
+          if (currentQuestion.question_number === 13) {
+            console.log(`[TRACE Q13] Question body continuation: "${lineText.substring(0, 40)}"`)
+          }
         }
       }
     }
@@ -203,28 +242,61 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
   // Sort by question number
   allQuestions.sort((a, b) => a.question_number - b.question_number)
 
-  const validCount = allQuestions.filter(q => q.parser_status === 'ready').length
+  // HONEST METRICS: Separate candidates from complete MCQs
+  const completeQuestions = allQuestions.filter(q => 
+    q.question_text?.length >= 10 &&
+    q.options.A?.length >= 1 &&
+    q.options.B?.length >= 1 &&
+    q.options.C?.length >= 1 &&
+    q.options.D?.length >= 1
+  )
+  
+  const validCount = completeQuestions.filter(q => q.parser_status === 'ready').length
   const needsReviewCount = allQuestions.filter(q => q.parser_status === 'needs_review').length
+  
+  // Count null bytes in final questions
+  let totalNullBytes = 0
+  allQuestions.forEach((q, idx) => {
+    let qNullBytes = 0
+    if (q.question_text?.includes('\u0000')) qNullBytes++
+    if (q.options.A?.includes('\u0000')) qNullBytes++
+    if (q.options.B?.includes('\u0000')) qNullBytes++
+    if (q.options.C?.includes('\u0000')) qNullBytes++
+    if (q.options.D?.includes('\u0000')) qNullBytes++
+    
+    if (qNullBytes > 0) {
+      console.warn(`[UNICODE-TRACE][PARSED-QUESTION] Q${q.question_number} nullByteFields=${qNullBytes}`)
+      totalNullBytes += qNullBytes
+    }
+  })
 
   console.log('[mcqParser] ═══ PARSING COMPLETE ═══')
   console.log('[mcqParser] processingJobId:', processingJobId)
-  console.log('[mcqParser] Total questions:', allQuestions.length)
-  console.log('[mcqParser] Valid:', validCount)
+  console.log('[mcqParser] ═══ HONEST METRICS ═══')
+  console.log('[mcqParser] Question candidates detected:', allQuestions.length)
+  console.log('[mcqParser] Complete MCQs (text + 4 options):', completeQuestions.length)
+  console.log('[mcqParser] Valid (ready):', validCount)
   console.log('[mcqParser] Needs review:', needsReviewCount)
+  console.log('[mcqParser] Total null bytes in parsed questions:', totalNullBytes)
   
   // Log first 10 question diagnostics
   console.log('[mcqParser] ═══ FIRST 10 QUESTION DIAGNOSTICS ═══')
   allQuestions.slice(0, 10).forEach(q => {
     console.log(`[mcqParser][VALIDATION] Q${q.question_number}:`, {
       question: !!q.question_text && q.question_text.length >= 3,
+      questionLen: q.question_text?.length || 0,
       questionPreview: q.question_text?.substring(0, 60) + '...',
       A: !!q.options.A,
+      A_len: q.options.A?.length || 0,
       A_preview: q.options.A?.substring(0, 40),
       B: !!q.options.B,
+      B_len: q.options.B?.length || 0,
       B_preview: q.options.B?.substring(0, 40),
       C: !!q.options.C,
+      C_len: q.options.C?.length || 0,
       C_preview: q.options.C?.substring(0, 40),
       D: !!q.options.D,
+      D_len: q.options.D?.length || 0,
       D_preview: q.options.D?.substring(0, 40),
       correct: q.correct_answer,
       status: q.parser_status,
@@ -239,6 +311,7 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
     totalPages,
     questions: allQuestions,
     totalQuestions: allQuestions.length,
+    completeQuestions: completeQuestions.length,
     validQuestions: validCount,
     needsReview: needsReviewCount,
     warnings: globalWarnings,
@@ -296,6 +369,16 @@ function removeTickMarks(text) {
 function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) {
   const qNum = question.question_number
 
+  // Deep trace for Q13
+  if (qNum === 13) {
+    console.log(`[TRACE Q13] ═══ FINALIZE Q13 ═══`)
+    console.log(`[TRACE Q13] question_text="${question.question_text}"`)
+    console.log(`[TRACE Q13] option_candidates:`, question.option_candidates.length)
+    question.option_candidates.forEach((c, i) => {
+      console.log(`[TRACE Q13]   [${i}] ${c.label}: "${c.text}"`)
+    })
+  }
+
   // Log for test questions
   if ([101, 102, 111, 133, 136].includes(qNum)) {
     console.log(`\n[mcqParser] [${processingJobId}] ═══ Q${qNum} ═══`)
@@ -351,14 +434,16 @@ function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) 
   }
 
   // Log final result for test questions
-  if ([101, 102, 111, 133, 136].includes(qNum)) {
+  if ([13, 101, 102, 111, 133, 136].includes(qNum)) {
     console.log(`[mcqParser] Final Q${qNum}:`)
+    console.log(`  Question: "${question.question_text?.substring(0, 100)}"`)
     console.log(`  A: "${question.options.A?.substring(0, 80)}"`)
     console.log(`  B: "${question.options.B?.substring(0, 80)}"`)
     console.log(`  C: "${question.options.C?.substring(0, 80)}"`)
     console.log(`  D: "${question.options.D?.substring(0, 80)}"`)
     console.log(`  Correct: ${question.correct_answer || 'none'}`)
     console.log(`  Status: ${question.parser_status}`)
+    console.log(`  Warnings: ${question.warnings.join(', ') || 'none'}`)
   }
 
   // Cleanup internal fields
