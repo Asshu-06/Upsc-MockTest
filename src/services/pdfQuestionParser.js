@@ -234,6 +234,7 @@ export const pdfQuestionParser = {
 
   /**
    * Parse options A, B, C, D from question body text
+   * Handles TNPSC matching questions with பட்டியல் I/II tables
    */
   parseOptionsFromBody(qBody) {
     let questionText = qBody
@@ -243,97 +244,177 @@ export const pdfQuestionParser = {
     let option_d = ''
     let detectedCorrectOption = null
     let explanation = ''
+    let questionType = 'normal' // or 'matching'
 
-    // TNPSC Format: Handles tick marks (☑) before options and multiple options per line
-    // Example: "☑ (A) text (B) text" or "(C) text (D) text."
-    const tnpscFormat = /[☑✓✔]?\s*[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[☑✓✔]?\s*[\(\[][A-Da-d][\)\]])|$)/gs
-    
-    let matches = [...qBody.matchAll(tnpscFormat)]
-    
-    // If TNPSC format found at least 4 options, use it
-    if (matches.length >= 4) {
-      const firstOptPos = matches[0].index
-      questionText = qBody.substring(0, firstOptPos).trim()
+    // STEP 1: Detect if this is a TNPSC matching question
+    const isMatchingQuestion = /(?:பட்டியல்|குற ய |List\s*[I1]|List\s*II)/i.test(qBody) ||
+                               /[அஆஇஈ][\.\)]\s/g.test(qBody)
 
-      matches.forEach((m) => {
-        let key = m[1].toUpperCase()
-        let val = m[2].trim()
+    if (isMatchingQuestion) {
+      console.log('[pdfMcqParser] Matching question detected')
+      questionType = 'matching'
+      
+      // Extract question text (everything before the matching table)
+      const tableStartMatch = qBody.match(/(?:பட்டியல்|குற ய |List)/i)
+      if (tableStartMatch) {
+        questionText = qBody.substring(0, tableStartMatch.index).trim()
+      }
+
+      // STEP 2: Find the ACTUAL A-D answer choices (AFTER the matching table)
+      // These are the code combinations like "A) 2, 3, 4, 1"
+      // They appear AFTER the matching table markers (அ, ஆ, இ, ஈ)
+      
+      // Look for patterns like:
+      // A) 2, 3, 4, 1  or  (A) ஈ, இ, ஆ, அ  or  ☑ (A) 1, 2, 3, 4
+      const answerChoicePattern = /[☑✓✔]?\s*[\(\[]?([A-D])[\)\]]\s*([0-9அஆஇஈ,\s]+)/gi
+      
+      // First, try to isolate the answer-choice section by finding text after Tamil matching markers
+      const tamilMarkerLastIndex = Math.max(
+        qBody.lastIndexOf('அ.'),
+        qBody.lastIndexOf('ஆ.'),
+        qBody.lastIndexOf('இ.'),
+        qBody.lastIndexOf('ஈ.')
+      )
+      
+      // Look for குறியீடு or similar keywords that signal answer section
+      const answerSectionMatch = qBody.match(/(?:குற ய |Code|Codes|குற ப்)/i)
+      const answerSectionStart = answerSectionMatch ? answerSectionMatch.index : 
+                                 (tamilMarkerLastIndex > 0 ? tamilMarkerLastIndex + 20 : 0)
+      
+      const answerSection = qBody.substring(answerSectionStart)
+      console.log('[pdfMcqParser] Answer section extracted:', answerSection.substring(0, 200))
+      
+      const matches = [...answerSection.matchAll(answerChoicePattern)]
+      
+      if (matches.length >= 4) {
+        console.log('[pdfMcqParser] Found', matches.length, 'answer choices')
         
-        // Clean up: remove trailing punctuation that might belong to next option
-        val = val.replace(/\s*[\(\[]?[A-Da-d][\)\]].*$/, '').trim()
-        val = val.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
-
-        if (key === 'A' && !option_a) option_a = val
-        if (key === 'B' && !option_b) option_b = val
-        if (key === 'C' && !option_c) option_c = val
-        if (key === 'D' && !option_d) option_d = val
-      })
+        matches.forEach((m, idx) => {
+          const key = m[1].toUpperCase()
+          let val = m[2].trim()
+          
+          // Clean up: remove content that belongs to other options
+          val = val.split(/[\(\[]?[A-D][\)\]]/)[0].trim()
+          val = val.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
+          
+          if (idx < 4) { // Only take first 4 matches
+            if (key === 'A' && !option_a) {
+              option_a = val
+              console.log('[pdfMcqParser] Option A:', val)
+            }
+            if (key === 'B' && !option_b) {
+              option_b = val
+              console.log('[pdfMcqParser] Option B:', val)
+            }
+            if (key === 'C' && !option_c) {
+              option_c = val
+              console.log('[pdfMcqParser] Option C:', val)
+            }
+            if (key === 'D' && !option_d) {
+              option_d = val
+              console.log('[pdfMcqParser] Option D:', val)
+            }
+          }
+        })
+      } else {
+        console.log('[pdfMcqParser] WARNING: Found only', matches.length, 'answer choices in matching question')
+      }
+      
     } else {
-      // Fallback to original UPSC formats
-      const optFormat1 = /[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[\(\[][A-Da-d][\)\]])|(?:Ans(?:wer)?:?)|$)/gs
-      const optFormat2 = /(?:^|\s)([A-Da-d])[\.\)]\s+(.*?)(?=(?:\s[A-Da-d][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
-      const optFormat3 = /(?:^|\s)([1-4])[\.\)]\s+(.*?)(?=(?:\s[1-4][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
-
-      matches = [...qBody.matchAll(optFormat1)]
-      if (matches.length < 4) matches = [...qBody.matchAll(optFormat2)]
-      if (matches.length < 4) matches = [...qBody.matchAll(optFormat3)]
-
+      // STEP 3: Normal MCQ (not a matching question)
+      console.log('[pdfMcqParser] Normal MCQ detected')
+      
+      // TNPSC Format: Handles tick marks (☑) before options and multiple options per line
+      // Example: "☑ (A) text (B) text" or "(C) text (D) text."
+      const tnpscFormat = /[☑✓✔]?\s*[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[☑✓✔]?\s*[\(\[][A-Da-d][\)\]])|$)/gs
+      
+      let matches = [...qBody.matchAll(tnpscFormat)]
+      
+      // If TNPSC format found at least 4 options, use it
       if (matches.length >= 4) {
         const firstOptPos = matches[0].index
         questionText = qBody.substring(0, firstOptPos).trim()
 
         matches.forEach((m) => {
           let key = m[1].toUpperCase()
-          if (key === '1') key = 'A'
-          if (key === '2') key = 'B'
-          if (key === '3') key = 'C'
-          if (key === '4') key = 'D'
+          let val = m[2].trim()
+          
+          // Clean up: remove trailing punctuation that might belong to next option
+          val = val.split(/[\(\[]?[A-Da-d][\)\]]/)[0].trim()
+          val = val.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
 
-          const val = m[2].replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
-
-          if (key === 'A') option_a = val
-          if (key === 'B') option_b = val
-          if (key === 'C') option_c = val
-          if (key === 'D') option_d = val
+          if (key === 'A' && !option_a) option_a = val
+          if (key === 'B' && !option_b) option_b = val
+          if (key === 'C' && !option_c) option_c = val
+          if (key === 'D' && !option_d) option_d = val
         })
       } else {
-        // Line-by-line fallback
-        const lines = qBody.split('\n')
-        const qTextLines = []
-        let currentOptKey = null
-        const optBuffers = { A: '', B: '', C: '', D: '' }
+        // Fallback to original UPSC formats
+        const optFormat1 = /[\(\[]([A-Da-d])[\)\]]\s*(.*?)(?=(?:[\(\[][A-Da-d][\)\]])|(?:Ans(?:wer)?:?)|$)/gs
+        const optFormat2 = /(?:^|\s)([A-Da-d])[\.\)]\s+(.*?)(?=(?:\s[A-Da-d][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
+        const optFormat3 = /(?:^|\s)([1-4])[\.\)]\s+(.*?)(?=(?:\s[1-4][\.\)]\s)|(?:Ans(?:wer)?:?)|$)/gs
 
-        lines.forEach((line) => {
-          const trimmed = line.trim()
-          const optLineMatch = trimmed.match(/^[☑✓✔]?\s*[\(\[]?([A-Da-d1-4])[\)\.\:]\s*(.*)/)
+        matches = [...qBody.matchAll(optFormat1)]
+        if (matches.length < 4) matches = [...qBody.matchAll(optFormat2)]
+        if (matches.length < 4) matches = [...qBody.matchAll(optFormat3)]
 
-          if (optLineMatch) {
-            let k = optLineMatch[1].toUpperCase()
-            if (k === '1') k = 'A'
-            if (k === '2') k = 'B'
-            if (k === '3') k = 'C'
-            if (k === '4') k = 'D'
+        if (matches.length >= 4) {
+          const firstOptPos = matches[0].index
+          questionText = qBody.substring(0, firstOptPos).trim()
 
-            if (['A', 'B', 'C', 'D'].includes(k)) {
-              currentOptKey = k
-              optBuffers[k] = optLineMatch[2].trim()
-              return
+          matches.forEach((m) => {
+            let key = m[1].toUpperCase()
+            if (key === '1') key = 'A'
+            if (key === '2') key = 'B'
+            if (key === '3') key = 'C'
+            if (key === '4') key = 'D'
+
+            const val = m[2].replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim()
+
+            if (key === 'A') option_a = val
+            if (key === 'B') option_b = val
+            if (key === 'C') option_c = val
+            if (key === 'D') option_d = val
+          })
+        } else {
+          // Line-by-line fallback
+          const lines = qBody.split('\n')
+          const qTextLines = []
+          let currentOptKey = null
+          const optBuffers = { A: '', B: '', C: '', D: '' }
+
+          lines.forEach((line) => {
+            const trimmed = line.trim()
+            const optLineMatch = trimmed.match(/^[☑✓✔]?\s*[\(\[]?([A-Da-d1-4])[\)\.\:]\s*(.*)/)
+
+            if (optLineMatch) {
+              let k = optLineMatch[1].toUpperCase()
+              if (k === '1') k = 'A'
+              if (k === '2') k = 'B'
+              if (k === '3') k = 'C'
+              if (k === '4') k = 'D'
+
+              if (['A', 'B', 'C', 'D'].includes(k)) {
+                currentOptKey = k
+                optBuffers[k] = optLineMatch[2].trim()
+                return
+              }
             }
-          }
 
-          if (currentOptKey) {
-            optBuffers[currentOptKey] += ' ' + trimmed
-          } else {
-            qTextLines.push(line)
-          }
-        })
+            if (currentOptKey) {
+              optBuffers[currentOptKey] += ' ' + trimmed
+            } else {
+              qTextLines.push(line)
+            }
+          })
 
-        if (optBuffers.A && optBuffers.B && optBuffers.C && optBuffers.D) {
-          questionText = qTextLines.join('\n').trim()
-          option_a = optBuffers.A.trim()
-          option_b = optBuffers.B.trim()
-          option_c = optBuffers.C.trim()
-          option_d = optBuffers.D.trim()
+          if (optBuffers.A && optBuffers.B && optBuffers.C && optBuffers.D) {
+            questionText = qTextLines.join('\n').trim()
+            option_a = optBuffers.A.trim()
+            option_b = optBuffers.B.trim()
+            option_c = optBuffers.C.trim()
+            option_d = optBuffers.D.trim()
+          }
         }
       }
     }
@@ -343,11 +424,12 @@ export const pdfQuestionParser = {
       .replace(/\s+/g, ' ')
       .trim()
 
-    // Detect tick marks as correct answer indicator
+    // STEP 4: Detect tick marks as correct answer indicator
     const tickMarkRegex = /[☑✓✔]\s*[\(\[]?([A-Da-d])[\)\]]?/
     const tickMatch = qBody.match(tickMarkRegex)
     if (tickMatch) {
       detectedCorrectOption = tickMatch[1].toUpperCase()
+      console.log('[pdfMcqParser] Tick detected for option:', detectedCorrectOption)
     }
 
     // Also check for explicit "Answer:" notation
@@ -363,7 +445,8 @@ export const pdfQuestionParser = {
       option_c,
       option_d,
       detectedCorrectOption,
-      explanation
+      explanation,
+      questionType
     }
   },
 
