@@ -6,7 +6,8 @@ import { paperSchema } from '../../lib/validations'
 import { paperService } from '../../services/paperService'
 import { storageService } from '../../services/storageService'
 import { questionService } from '../../services/questionService'
-import { pdfQuestionParser } from '../../services/pdfQuestionParser'
+import { extractPdfText } from '../../services/pdfTextExtractor'
+import { parseMcqQuestions } from '../../services/mcqParser'
 import { PdfQuestionImporter } from '../../components/admin/PdfQuestionImporter'
 import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2, CheckCircle2, HelpCircle, RefreshCw, FileText, Sparkles } from 'lucide-react'
 
@@ -158,7 +159,10 @@ export function CreateEditPaperPage() {
         }
 
         if (pdfInput) {
-          const result = await pdfQuestionParser.parsePdf(pdfInput)
+          // Extract text with coordinates
+          const extractionResult = await extractPdfText(pdfInput)
+          // Parse MCQs
+          const result = await parseMcqQuestions(extractionResult)
           setExtractionResult(result)
 
           // Scroll to extraction results section
@@ -195,7 +199,10 @@ export function CreateEditPaperPage() {
         pdfInput = await storageService.getPdfPublicUrl(pdfUploadPath)
       }
 
-      const result = await pdfQuestionParser.parsePdf(pdfInput)
+      // Extract text with coordinates
+      const extractionResult = await extractPdfText(pdfInput)
+      // Parse MCQs
+      const result = await parseMcqQuestions(extractionResult)
       setExtractionResult(result)
     } catch (err) {
       console.error('Retry extraction error:', err)

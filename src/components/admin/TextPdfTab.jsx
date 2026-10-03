@@ -23,7 +23,7 @@ import {
 import { useApp } from '../../contexts/AppContext'
 import { questionService } from '../../services/questionService'
 import { extractPdfText } from '../../services/pdfTextExtractor'
-import { parseMcqQuestions } from '../../services/pdfMcqParser'
+import { parseMcqQuestions } from '../../services/mcqParser'
 
 // ─── Progress Display ──────────────────────────────────────────────────────────
 function ExtractionProgress({ stage, currentPage, totalPages }) {
