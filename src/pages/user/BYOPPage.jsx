@@ -575,8 +575,15 @@ export function BYOPPage() {
 
       console.log('[BYOP] Storing extraction result...')
       
-      // Prepare payload with Unicode sanitization
+      // NOTE: questionsCount = 20 is intentional preview limit for uploaded_papers.questions_json
+      // Full questions will be saved to papers.questions table later when user confirms/edits
+      // This prevents huge JSONB payload in uploaded_papers tracking table
       const questionsPreview = questions.slice(0, 20)
+      console.log('[BYOP] Questions preview limit:', {
+        totalExtracted: questions.length,
+        previewCount: questionsPreview.length,
+        reason: 'Intentional limit - full questions saved when user confirms extraction'
+      })
       
       // Sanitize Unicode recursively to remove unpaired surrogates
       const sanitizeUnicode = (value) => {
@@ -615,6 +622,65 @@ export function BYOPPage() {
       }
       
       const sanitizedQuestions = sanitizeUnicode(questionsPreview)
+      
+      // Scan for malformed Unicode escape sequences
+      console.log('[BYOP] Scanning for malformed Unicode sequences...')
+      const scanForMalformedUnicode = (obj, path = '') => {
+        const issues = []
+        
+        if (typeof obj === 'string') {
+          // Look for literal backslash-u sequences that are NOT valid escapes
+          const literalBackslashU = /\\u([0-9a-fA-F]{0,3}[^0-9a-fA-F]|[0-9a-fA-F]{0,2}$|[^0-9a-fA-F])/g
+          let match
+          while ((match = literalBackslashU.exec(obj)) !== null) {
+            issues.push({
+              path,
+              index: match.index,
+              sequence: obj.substring(match.index, match.index + 6),
+              context: obj.substring(Math.max(0, match.index - 20), match.index + 26)
+            })
+          }
+          
+          // Also check for other suspicious backslash sequences
+          const suspiciousBackslash = /\\[^"'\\/bfnrtu]/g
+          while ((match = suspiciousBackslash.exec(obj)) !== null) {
+            issues.push({
+              path,
+              index: match.index,
+              sequence: obj.substring(match.index, match.index + 2),
+              type: 'suspicious_backslash',
+              context: obj.substring(Math.max(0, match.index - 20), match.index + 22)
+            })
+          }
+        } else if (Array.isArray(obj)) {
+          obj.forEach((item, idx) => {
+            issues.push(...scanForMalformedUnicode(item, `${path}[${idx}]`))
+          })
+        } else if (obj && typeof obj === 'object') {
+          Object.entries(obj).forEach(([key, value]) => {
+            const newPath = path ? `${path}.${key}` : key
+            issues.push(...scanForMalformedUnicode(value, newPath))
+          })
+        }
+        
+        return issues
+      }
+      
+      const unicodeIssues = scanForMalformedUnicode(sanitizedQuestions)
+      
+      if (unicodeIssues.length > 0) {
+        console.warn('[BYOP][UNICODE DEBUG] Found suspicious sequences:', unicodeIssues.slice(0, 10))
+        unicodeIssues.slice(0, 10).forEach(issue => {
+          console.warn(`[BYOP][UNICODE DEBUG] ${issue.path}:`, {
+            index: issue.index,
+            sequence: issue.sequence,
+            type: issue.type || 'malformed_unicode',
+            context: issue.context
+          })
+        })
+      } else {
+        console.log('[BYOP] No malformed Unicode sequences detected')
+      }
       
       // Test JSON serialization BEFORE Supabase call
       let serialized
@@ -658,8 +724,70 @@ export function BYOPPage() {
         questions_json_length: storagePayload.questions_json?.length
       })
       
+      // Field-by-field diagnostic test
+      console.log('[BYOP] Starting field-by-field diagnostic test...')
+      
+      try {
+        // Test 1: Status only
+        console.log('[BYOP] TEST 1: Status only')
+        await byopService.update(paper.id, user.id, {
+          processing_status: newStatus
+        })
+        console.log('[BYOP] ✓ TEST 1 PASS: Status')
+        
+        // Test 2: Status + counts
+        console.log('[BYOP] TEST 2: Status + counts')
+        await byopService.update(paper.id, user.id, {
+          processing_status: newStatus,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
+          extracted_count: questions.length
+        })
+        console.log('[BYOP] ✓ TEST 2 PASS: Status + counts')
+        
+        // Test 3: + batch_progress_json
+        console.log('[BYOP] TEST 3: + batch_progress_json')
+        await byopService.update(paper.id, user.id, {
+          processing_status: newStatus,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
+          extracted_count: questions.length,
+          batch_progress_json: []
+        })
+        console.log('[BYOP] ✓ TEST 3 PASS: + batch_progress_json')
+        
+        // Test 4: + notes
+        console.log('[BYOP] TEST 4: + notes')
+        await byopService.update(paper.id, user.id, {
+          processing_status: newStatus,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
+          extracted_count: questions.length,
+          batch_progress_json: [],
+          notes: storagePayload.notes
+        })
+        console.log('[BYOP] ✓ TEST 4 PASS: + notes')
+        
+        // Test 5: + questions_json (THE CRITICAL TEST)
+        console.log('[BYOP] TEST 5: + questions_json [THIS IS THE CRITICAL TEST]')
+        await byopService.update(paper.id, user.id, storagePayload)
+        console.log('[BYOP] ✓ TEST 5 PASS: Full payload including questions_json')
+        
+      } catch (testErr) {
+        console.error('[BYOP] ✗ FIELD TEST FAILED:', {
+          processingJobId,
+          message: testErr.message,
+          details: testErr.details,
+          hint: testErr.hint,
+          code: testErr.code
+        })
+        throw testErr
+      }
+      
+      console.log('[BYOP] All field tests passed, final update complete')
+      
       // Supabase update
-      await byopService.update(paper.id, user.id, storagePayload)
+      // await byopService.update(paper.id, user.id, storagePayload)
 
       setPapers(prev => prev.map(p => p.id === paper.id
         ? { ...p, processing_status: newStatus, extracted_count: questions.length }

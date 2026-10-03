@@ -361,12 +361,37 @@ export const byopService = {
   },
 
   async update(id, userId, payload) {
+    console.log('[byopService] PATCH REQUEST:', {
+      id,
+      userId,
+      fieldNames: Object.keys(payload),
+      fieldTypes: Object.fromEntries(
+        Object.entries(payload).map(([k, v]) => [
+          k,
+          Array.isArray(v) ? `array[${v.length}]` : typeof v
+        ])
+      )
+    })
+    
     const { data, error } = await supabase
       .from('uploaded_papers')
       .update({ ...payload, updated_at: new Date().toISOString() })
       .eq('id', id).eq('user_id', userId)
       .select().single()
-    if (error) throw error
+    
+    if (error) {
+      console.error('[byopService] SUPABASE PATCH ERROR:', {
+        message: error?.message,
+        details: error?.details,
+        hint: error?.hint,
+        code: error?.code,
+        statusCode: error?.statusCode,
+        statusText: error?.statusText
+      })
+      throw error
+    }
+    
+    console.log('[byopService] PATCH SUCCESS:', { id })
     return data
   },
 
