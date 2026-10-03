@@ -72,19 +72,22 @@ const IGNORE_PATTERNS = [
 /**
  * Parse MCQ questions from extracted PDF data
  * @param {Object} extractionResult - From pdfTextExtractor
- * @param {Function} onProgress - Optional progress callback
+ * @param {string} processingJobId - Unique ID for this processing run
+ * @param {string} fileName - Original filename for logging
  * @returns {Promise<Object>} Parsed questions with metadata
  */
-export async function parseMcqQuestions(extractionResult, onProgress = null) {
-  const { pages, fileName, totalPages, hasSelectableText, warnings: extractWarnings } = extractionResult
+export async function parseMcqQuestions(extractionResult, processingJobId = 'unknown', fileName = 'unknown') {
+  const { pages, totalPages, hasSelectableText, warnings: extractWarnings } = extractionResult
 
-  console.log('[mcqParser] Starting parse')
-  console.log('[mcqParser] File:', fileName)
+  console.log('[mcqParser] ═══ PARSING START ═══')
+  console.log('[mcqParser] processingJobId:', processingJobId)
+  console.log('[mcqParser] fileName:', fileName)
   console.log('[mcqParser] Pages:', totalPages)
-  console.log('[mcqParser] Hastext:', hasSelectableText)
+  console.log('[mcqParser] HasText:', hasSelectableText)
 
   if (!hasSelectableText) {
     return {
+      processingJobId,
       fileName,
       totalPages,
       questions: [],
@@ -104,16 +107,9 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
   // Process each page
   for (const pageData of pages) {
     const { pageNumber, items } = pageData
+    const pageTextLength = items.reduce((sum, i) => sum + (i.text?.length || 0), 0)
 
-    console.log(`[mcqParser] Page ${pageNumber}: ${items.length} items`)
-
-    if (onProgress) {
-      try {
-        onProgress(pageNumber, totalPages)
-      } catch (e) {
-        // Never crash on progress callback
-      }
-    }
+    console.log(`[mcqParser] [${processingJobId}] page=${pageNumber}/${totalPages} items=${items.length} textLen=${pageTextLength}`)
 
     // Group into lines using coordinates
     const lines = groupItemsByLine(items, 3) // 3px Y-tolerance
@@ -131,13 +127,13 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
         questionCount++
         
         // Log first few questions
-        if (questionCount <= 10) {
-          console.log(`[mcqParser] Q${questionMatch.number}: "${questionMatch.remainder.substring(0, 100)}"`)
+        if (questionCount <= 5) {
+          console.log(`[mcqParser] [${processingJobId}] Q${questionMatch.number} detected: "${questionMatch.remainder.substring(0, 60)}..."`)
         }
 
         // Save previous question
         if (currentQuestion) {
-          allQuestions.push(finalizeQuestion(currentQuestion, items, globalWarnings))
+          allQuestions.push(finalizeQuestion(currentQuestion, items, globalWarnings, processingJobId))
         }
 
         // Start new question
@@ -201,7 +197,7 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
 
   // Finalize last question
   if (currentQuestion) {
-    allQuestions.push(finalizeQuestion(currentQuestion, pages[pages.length - 1].items, globalWarnings))
+    allQuestions.push(finalizeQuestion(currentQuestion, pages[pages.length - 1].items, globalWarnings, processingJobId))
   }
 
   // Sort by question number
@@ -210,11 +206,35 @@ export async function parseMcqQuestions(extractionResult, onProgress = null) {
   const validCount = allQuestions.filter(q => q.parser_status === 'ready').length
   const needsReviewCount = allQuestions.filter(q => q.parser_status === 'needs_review').length
 
+  console.log('[mcqParser] ═══ PARSING COMPLETE ═══')
+  console.log('[mcqParser] processingJobId:', processingJobId)
   console.log('[mcqParser] Total questions:', allQuestions.length)
   console.log('[mcqParser] Valid:', validCount)
   console.log('[mcqParser] Needs review:', needsReviewCount)
+  
+  // Log first 10 question diagnostics
+  console.log('[mcqParser] ═══ FIRST 10 QUESTION DIAGNOSTICS ═══')
+  allQuestions.slice(0, 10).forEach(q => {
+    console.log(`[mcqParser][VALIDATION] Q${q.question_number}:`, {
+      question: !!q.question_text && q.question_text.length >= 3,
+      questionPreview: q.question_text?.substring(0, 60) + '...',
+      A: !!q.options.A,
+      A_preview: q.options.A?.substring(0, 40),
+      B: !!q.options.B,
+      B_preview: q.options.B?.substring(0, 40),
+      C: !!q.options.C,
+      C_preview: q.options.C?.substring(0, 40),
+      D: !!q.options.D,
+      D_preview: q.options.D?.substring(0, 40),
+      correct: q.correct_answer,
+      status: q.parser_status,
+      errors: q.errors,
+      warnings: q.warnings
+    })
+  })
 
   return {
+    processingJobId,
     fileName,
     totalPages,
     questions: allQuestions,
@@ -273,16 +293,16 @@ function removeTickMarks(text) {
 }
 
 // ─── Finalize Question ────────────────────────────────────────────────────
-function finalizeQuestion(question, pageItems, globalWarnings) {
+function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) {
   const qNum = question.question_number
 
   // Log for test questions
   if ([101, 102, 111, 133, 136].includes(qNum)) {
-    console.log(`\n[mcqParser] ═══ Q${qNum} ═══`)
-    console.log(`[mcqParser] Question text (first 150 chars):`, question.question_text.substring(0, 150))
+    console.log(`\n[mcqParser] [${processingJobId}] ═══ Q${qNum} ═══`)
+    console.log(`[mcqParser] Question text (first 100 chars):`, question.question_text.substring(0, 100))
     console.log(`[mcqParser] Candidates found:`, question.option_candidates.length)
     question.option_candidates.forEach((c, i) => {
-      console.log(`  [${i}] ${c.label}: "${c.text.substring(0, 80)}" ${c.hasTick ? '☑' : ''}`)
+      console.log(`  [${i}] ${c.label}: "${c.text.substring(0, 60)}" ${c.hasTick ? '☑' : ''}`)
     })
   }
 

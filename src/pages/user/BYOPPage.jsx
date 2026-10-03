@@ -517,7 +517,7 @@ export function BYOPPage() {
         statusText: 'Parsing questions from text...'
       })
 
-      const parseResult = await parseMcqQuestions(extractionResult)
+      const parseResult = await parseMcqQuestions(extractionResult, processingJobId, paper.file_name)
       const questions = parseResult.questions || []
 
       console.log('[BYOP] MCQ parsing complete:', {

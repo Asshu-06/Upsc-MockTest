@@ -159,10 +159,54 @@ export function CreateEditPaperPage() {
         }
 
         if (pdfInput) {
+          // Generate unique processing job ID
+          const processingJobId = `admin-${Date.now()}`
+          const fileName = pdfFile?.name || currentPath?.split('/').pop() || 'unknown.pdf'
+          
+          console.log('[AdminPDF] ═══ PROCESS START ═══')
+          console.log('[AdminPDF] processingJobId:', processingJobId)
+          console.log('[AdminPDF] paperId:', paperId || 'new')
+          console.log('[AdminPDF] fileName:', fileName)
+          console.log('[AdminPDF] timestamp:', new Date().toISOString())
+
           // Extract text with coordinates
+          console.log('[AdminPDF] Starting PDF.js extraction...')
           const extractionResult = await extractPdfText(pdfInput)
+          
+          // Log extraction metrics
+          const totalTextItems = extractionResult.pages?.reduce((sum, p) => sum + (p.items?.length || 0), 0) || 0
+          const extractedTextLength = extractionResult.pages?.reduce((sum, page) => 
+            sum + page.items.reduce((s, item) => s + (item.text?.length || 0), 0), 0) || 0
+          
+          console.log('[AdminPDF] PDF.js extraction complete:', {
+            processingJobId,
+            fileName,
+            numPages: extractionResult.totalPages,
+            totalTextItems,
+            extractedTextLength,
+            hasSelectableText: extractionResult.hasSelectableText
+          })
+          
+          // Log first 3 pages detail
+          extractionResult.pages?.slice(0, 3).forEach(page => {
+            const pageTextLength = page.items.reduce((s, i) => s + (i.text?.length || 0), 0)
+            console.log(`[AdminPDF] page=${page.pageNumber}/${extractionResult.totalPages} items=${page.items.length} textLength=${pageTextLength}`)
+          })
+          
           // Parse MCQs
-          const result = await parseMcqQuestions(extractionResult)
+          console.log('[AdminPDF] Starting MCQ parsing...')
+          const result = await parseMcqQuestions(extractionResult, processingJobId, fileName)
+          
+          console.log('[AdminPDF] MCQ parsing complete:', {
+            processingJobId,
+            fileName,
+            totalQuestions: result.totalQuestions,
+            validQuestions: result.validQuestions,
+            needsReview: result.needsReview
+          })
+          
+          console.log('[AdminPDF] ═══ PROCESS END ═══', { processingJobId })
+          
           setExtractionResult(result)
 
           // Scroll to extraction results section
@@ -194,15 +238,50 @@ export function CreateEditPaperPage() {
     setServerError(null)
 
     try {
+      // Generate unique processing job ID
+      const processingJobId = `admin-retry-${Date.now()}`
+      const fileName = pdfFile?.name || pdfUploadPath?.split('/').pop() || 'unknown.pdf'
+      
+      console.log('[AdminPDF] ═══ RETRY PROCESS START ═══')
+      console.log('[AdminPDF] processingJobId:', processingJobId)
+      console.log('[AdminPDF] fileName:', fileName)
+
       let pdfInput = pdfFile
       if (!pdfInput && pdfUploadPath) {
         pdfInput = await storageService.getPdfPublicUrl(pdfUploadPath)
       }
 
       // Extract text with coordinates
+      console.log('[AdminPDF] Starting PDF.js extraction...')
       const extractionResult = await extractPdfText(pdfInput)
+      
+      // Log extraction metrics
+      const totalTextItems = extractionResult.pages?.reduce((sum, p) => sum + (p.items?.length || 0), 0) || 0
+      const extractedTextLength = extractionResult.pages?.reduce((sum, page) => 
+        sum + page.items.reduce((s, item) => s + (item.text?.length || 0), 0), 0) || 0
+      
+      console.log('[AdminPDF] PDF.js extraction complete:', {
+        processingJobId,
+        fileName,
+        numPages: extractionResult.totalPages,
+        totalTextItems,
+        extractedTextLength,
+        hasSelectableText: extractionResult.hasSelectableText
+      })
+      
       // Parse MCQs
-      const result = await parseMcqQuestions(extractionResult)
+      console.log('[AdminPDF] Starting MCQ parsing...')
+      const result = await parseMcqQuestions(extractionResult, processingJobId, fileName)
+      
+      console.log('[AdminPDF] MCQ parsing complete:', {
+        processingJobId,
+        fileName,
+        totalQuestions: result.totalQuestions,
+        validQuestions: result.validQuestions,
+        needsReview: result.needsReview
+      })
+      
+      console.log('[AdminPDF] ═══ RETRY PROCESS END ═══', { processingJobId })
       setExtractionResult(result)
     } catch (err) {
       console.error('Retry extraction error:', err)
