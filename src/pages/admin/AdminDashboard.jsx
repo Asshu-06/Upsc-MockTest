@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   FileText, HelpCircle, Users, BarChart3, Newspaper, BellRing,
   Brain, BookMarked, PlusCircle, Loader2, AlertCircle,
-  CheckCircle2, Info, AlertTriangle, TrendingUp, Zap,
+  CheckCircle2, Info, AlertTriangle, TrendingUp, Upload,
 } from 'lucide-react'
 import { adminStatsService } from '../../services/adminService'
 import { useAuth } from '../../hooks/useAuth'
@@ -26,6 +26,7 @@ const QUICK_ACTIONS = [
   { label: '+ Recall Question',   path: '/admin/recall?action=new',          color: 'bg-orange-600 text-white hover:bg-orange-700' },
   { label: '+ Syllabus Unit',     path: '/admin/syllabus',                   color: 'bg-purple-600 text-white hover:bg-purple-700' },
   { label: '+ Paper',             path: '/admin/papers/create',              color: 'bg-blue-600 text-white hover:bg-blue-700' },
+  { label: 'PDF Import',          path: '/admin/pdf-import',                 color: 'bg-indigo-600 text-white hover:bg-indigo-700' },
   { label: 'Attempt Reports',     path: '/admin/attempts',                   color: 'bg-white border border-surface-border text-body-text hover:bg-slate-50' },
 ]
 
@@ -111,6 +112,7 @@ export function AdminDashboard() {
         {[
           { title: 'Papers',           path: '/admin/papers',          icon: FileText,  desc: 'Create, import and publish question papers' },
           { title: 'Questions',        path: '/admin/questions',       icon: HelpCircle,desc: 'Manage the full question bank' },
+          { title: 'PDF Import',       path: '/admin/pdf-import',      icon: Upload,    desc: 'Extract questions from PDF files automatically' },
           { title: 'Current Affairs',  path: '/admin/current-affairs', icon: Newspaper, desc: 'Add and publish current affairs articles' },
           { title: 'Govt Notifications',path: '/admin/notifications',  icon: BellRing,  desc: 'Manage vacancies and official notifications' },
           { title: 'Syllabus',         path: '/admin/syllabus',        icon: BookMarked,desc: 'Build the exam syllabus hierarchy' },

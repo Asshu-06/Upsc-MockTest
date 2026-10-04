@@ -868,6 +868,13 @@ export function BYOPPage() {
           option_d:        q.option_d || '',
           correct_option:  q.correct_option ?? null,
           explanation:     null,
+          // Include Tamil fields
+          question_text_tamil: q.question_text_tamil || q.tamil_question || null,
+          option_a_tamil: q.option_a_tamil || null,
+          option_b_tamil: q.option_b_tamil || null,
+          option_c_tamil: q.option_c_tamil || null,
+          option_d_tamil: q.option_d_tamil || null,
+          explanation_tamil: q.explanation_tamil || null,
         }))
 
       await questionService.saveQuestionsToSupabase(newPaper.id, toSave, false)

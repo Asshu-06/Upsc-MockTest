@@ -6,7 +6,7 @@ export const questionService = {
     
     // In exam mode, do not expose correct_option or explanation to client network responses
     if (isExamMode) {
-      selectFields = 'id, paper_id, question_number, question_text, option_a, option_b, option_c, option_d'
+      selectFields = 'id, paper_id, question_number, question_text, question_text_tamil, option_a, option_b, option_c, option_d, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil'
     }
 
     const { data, error } = await supabase
@@ -108,7 +108,7 @@ export const questionService = {
         })
       }
 
-      return {
+      const questionData = {
         paper_id: paperId,
         question_number: parseInt(q.question_number, 10),
         question_text: q.question_text || '',
@@ -119,6 +119,36 @@ export const questionService = {
         correct_option: validOpt,
         explanation: q.explanation || q.extraction_notes || null
       }
+
+      // Add Tamil language fields if they exist
+      if (q.question_text_tamil) {
+        questionData.question_text_tamil = q.question_text_tamil
+      }
+      if (q.option_a_tamil) {
+        questionData.option_a_tamil = q.option_a_tamil
+      }
+      if (q.option_b_tamil) {
+        questionData.option_b_tamil = q.option_b_tamil
+      }
+      if (q.option_c_tamil) {
+        questionData.option_c_tamil = q.option_c_tamil
+      }
+      if (q.option_d_tamil) {
+        questionData.option_d_tamil = q.option_d_tamil
+      }
+      if (q.explanation_tamil) {
+        questionData.explanation_tamil = q.explanation_tamil
+      }
+
+      // Only add source_pdf and page_number if they exist (for backward compatibility)
+      if (q.source_pdf) {
+        questionData.source_pdf = q.source_pdf
+      }
+      if (q.page_number) {
+        questionData.page_number = q.page_number
+      }
+
+      return questionData
     })
 
     // Deduplicate formatted list by question_number to ensure PostgreSQL ON CONFLICT DO UPDATE never encounters duplicate keys in a single batch

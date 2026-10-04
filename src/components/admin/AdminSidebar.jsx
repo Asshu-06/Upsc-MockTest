@@ -21,6 +21,7 @@ const SECTIONS = [
     items: [
       { label: 'Papers / PYQs',   path: '/admin/papers',        icon: FileText },
       { label: 'Questions',       path: '/admin/questions',      icon: HelpCircle },
+      { label: 'PDF Import',      path: '/admin/pdf-import',     icon: Upload },
       { label: 'Syllabus',        path: '/admin/syllabus',       icon: BookMarked },
       { label: 'Quick Recall',    path: '/admin/recall',         icon: Brain },
     ],

@@ -38,6 +38,7 @@ import { AdminPapersPage }        from '../pages/admin/AdminPapersPage'
 import { CreateEditPaperPage }    from '../pages/admin/CreateEditPaperPage'
 import { QuestionManagementPage } from '../pages/admin/QuestionManagementPage'
 import { ImportQuestionsPage }    from '../pages/admin/ImportQuestionsPage'
+import { AdminPdfImportPage }     from '../pages/admin/AdminPdfImportPage'
 import { AdminAttemptsPage }      from '../pages/admin/AdminAttemptsPage'
 // TNPSC Admin CMS pages
 import { AdminCurrentAffairsPage } from '../pages/admin/AdminCurrentAffairsPage'
@@ -94,6 +95,7 @@ export function AppRoutes() {
         <Route path="/admin/papers/:paperId/edit"         element={<CreateEditPaperPage />} />
         <Route path="/admin/papers/:paperId/questions"    element={<QuestionManagementPage />} />
         <Route path="/admin/papers/:paperId/import"       element={<ImportQuestionsPage />} />
+        <Route path="/admin/pdf-import"                   element={<AdminPdfImportPage />} />
         <Route path="/admin/attempts"                     element={<AdminAttemptsPage />} />
         {/* TNPSC CMS */}
         <Route path="/admin/current-affairs"              element={<AdminCurrentAffairsPage />} />

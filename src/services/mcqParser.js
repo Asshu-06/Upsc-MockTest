@@ -32,8 +32,8 @@
 import { groupItemsByLine, reconstructLineText, findNearbyItems } from './pdfTextExtractor'
 
 // ─── Constants ─────────────────────────────────────────────────────────────
-const TICK_MARKS = ['✓', '✔', '☑', '√', '✅', '☒']
-const TICK_REGEX = /[✓✔☑√✅☒]/
+const TICK_MARKS = ['✓', '✔', '☑', '√', '✅', '☒', '3', '✔️', '✓️', '●', '◉', '⬤', '🗹']  // Add more tick variants including Tamil/Unicode
+const TICK_REGEX = /[✓✔☑√✅☒3●◉⬤🗹]|✔️|✓️/
 
 // ─── Question Detection Patterns (Language-agnostic) ──────────────────────
 const QUESTION_PATTERNS = [
@@ -160,6 +160,15 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         const hasTick = detectTickMark(lineText)
         const cleanText = removeTickMarks(remainder)
 
+        // Debug tick detection for first few questions
+        if (questionCount <= 5 || (currentQuestion.question_number && currentQuestion.question_number <= 10)) {
+          console.log(`[mcqParser][TICK] Q${currentQuestion.question_number} Option ${label}:`)
+          console.log(`  Original text: "${lineText}"`)
+          console.log(`  Remainder: "${remainder}"`) 
+          console.log(`  Tick detected: ${hasTick}`)
+          console.log(`  Clean text: "${cleanText}"`)
+        }
+
         // Record as candidate
         currentQuestion.option_candidates.push({
           label: label.toUpperCase(),
@@ -212,21 +221,21 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
   console.log('[mcqParser] Valid:', validCount)
   console.log('[mcqParser] Needs review:', needsReviewCount)
   
-  // Log first 10 question diagnostics
+  // Log first 10 question diagnostics (check both formats for compatibility)
   console.log('[mcqParser] ═══ FIRST 10 QUESTION DIAGNOSTICS ═══')
   allQuestions.slice(0, 10).forEach(q => {
     console.log(`[mcqParser][VALIDATION] Q${q.question_number}:`, {
       question: !!q.question_text && q.question_text.length >= 3,
       questionPreview: q.question_text?.substring(0, 60) + '...',
-      A: !!q.options.A,
-      A_preview: q.options.A?.substring(0, 40),
-      B: !!q.options.B,
-      B_preview: q.options.B?.substring(0, 40),
-      C: !!q.options.C,
-      C_preview: q.options.C?.substring(0, 40),
-      D: !!q.options.D,
-      D_preview: q.options.D?.substring(0, 40),
-      correct: q.correct_answer,
+      A: !!(q.option_a || q.options?.A),
+      A_preview: (q.option_a || q.options?.A)?.substring(0, 40),
+      B: !!(q.option_b || q.options?.B),
+      B_preview: (q.option_b || q.options?.B)?.substring(0, 40),
+      C: !!(q.option_c || q.options?.C),
+      C_preview: (q.option_c || q.options?.C)?.substring(0, 40),
+      D: !!(q.option_d || q.options?.D),
+      D_preview: (q.option_d || q.options?.D)?.substring(0, 40),
+      correct: q.correct_option || q.correct_answer,
       status: q.parser_status,
       errors: q.errors,
       warnings: q.warnings
@@ -285,11 +294,64 @@ function detectOptionLabel(text) {
 }
 
 function detectTickMark(text) {
-  return TICK_REGEX.test(text)
+  // First check for standard Unicode tick marks (including emoji variants)
+  if (/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/.test(text)) {
+    return true
+  }
+  
+  // Check for "3" as tick mark - but be more careful
+  // "3" is likely a tick if:
+  // 1. It appears at the end of the option text
+  // 2. It's isolated by spaces
+  // 3. It's not part of a number sequence
+  
+  // Pattern 1: "3" at the end of text (most common case)
+  if (/\s3\s*$/.test(text)) {
+    return true
+  }
+  
+  // Pattern 2: Standalone "3" surrounded by spaces  
+  if (/\s3\s/.test(text)) {
+    return true
+  }
+  
+  // Pattern 3: "3" at the beginning after option label (like "A) Mumbai 3")
+  if (/^[A-Da-d][)\]\.\s]+.*\s3\s*$/.test(text)) {
+    return true
+  }
+  
+  // Pattern 4: Check for other common Tamil/Indian tick representations
+  // Sometimes PDFs use different Unicode characters
+  if (/[॔।॥॰᠎]/.test(text)) {
+    return true
+  }
+  
+  // Pattern 5: Check for parenthetical marks like (✓) or (*)
+  if (/\([*✓✔√x×]\)/i.test(text)) {
+    return true
+  }
+  
+  return false
 }
 
 function removeTickMarks(text) {
-  return text.replace(TICK_REGEX, '').trim()
+  // Remove standard tick marks including emoji variants
+  let cleaned = text.replace(/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/g, '').trim()
+  
+  // Remove "3" tick marks more carefully
+  // Remove "3" at the end
+  cleaned = cleaned.replace(/\s3\s*$/, '').trim()
+  
+  // Remove standalone "3" surrounded by spaces
+  cleaned = cleaned.replace(/\s3\s/g, ' ').trim()
+  
+  // Remove Tamil/Indian tick marks
+  cleaned = cleaned.replace(/[॔।॥॰᠎]/g, '').trim()
+  
+  // Remove parenthetical marks
+  cleaned = cleaned.replace(/\([*✓✔√x×]\)/gi, '').trim()
+  
+  return cleaned
 }
 
 // ─── Finalize Question ────────────────────────────────────────────────────
@@ -318,6 +380,7 @@ function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) 
       question.options[opt.label] = opt.text
       if (opt.hasTick && !question.correct_answer) {
         question.correct_answer = opt.label
+        console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${opt.label} marked as correct (embedded tick)`)
       }
     })
   } else {
@@ -330,6 +393,7 @@ function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) 
           question.warnings.push('Multiple tick marks detected')
         } else {
           question.correct_answer = opt.label
+          console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${opt.label} marked as correct (embedded tick)`)
         }
       }
     })
@@ -339,6 +403,7 @@ function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) 
       const posTickResult = detectPositionalTick(pageItems, question, selectedGroup)
       if (posTickResult) {
         question.correct_answer = posTickResult
+        console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${posTickResult} marked as correct (positional tick)`)
       }
     }
   }
@@ -361,10 +426,51 @@ function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) 
     console.log(`  Status: ${question.parser_status}`)
   }
 
+  // CONVERT options object to flat fields for database compatibility
+  // Database expects: option_a, option_b, option_c, option_d
+  // Parser uses: options.A, options.B, options.C, options.D
+  question.option_a = question.options.A || ''
+  question.option_b = question.options.B || ''
+  question.option_c = question.options.C || ''
+  question.option_d = question.options.D || ''
+
+  // Map correct_answer to correct_option for database
+  question.correct_option = question.correct_answer
+
+  // Add page_number from page_number field
+  if (!question.page_number) {
+    question.page_number = question.page_number || 1
+  }
+
+  // Detect if content is Tamil and populate Tamil fields
+  // Tamil text detection: contains Tamil Unicode characters
+  const containsTamil = (text) => text && /[\u0B80-\u0BFF]/.test(text)
+  
+  if (containsTamil(question.question_text)) {
+    question.question_text_tamil = question.question_text
+    // If question is Tamil, keep original as Tamil and don't duplicate in English field
+  }
+  
+  // Check each option for Tamil content
+  ['A', 'B', 'C', 'D'].forEach((letter, index) => {
+    const optionText = question.options[letter] || ''
+    const fieldName = `option_${letter.toLowerCase()}`
+    const tamilFieldName = `option_${letter.toLowerCase()}_tamil`
+    
+    if (containsTamil(optionText)) {
+      // If option contains Tamil, store in Tamil field
+      question[tamilFieldName] = optionText
+      // Keep the original in the regular field too for fallback
+      question[fieldName] = optionText
+    }
+  })
+
   // Cleanup internal fields
   delete question.option_candidates
   delete question._startLineIdx
   delete question._startY
+  delete question.options  // Remove options object after converting to flat fields
+  delete question.correct_answer  // Remove after mapping to correct_option
 
   return question
 }
@@ -416,8 +522,13 @@ function selectOptionGroup(candidates, qNum) {
   // Select the one with best score
   sequences.sort((a, b) => b.score - a.score)
   
-  if ([101, 102, 111, 133, 136].includes(qNum)) {
-    console.log(`[mcqParser] Q${qNum}: Found ${sequences.length} A-D sequences, using highest scoring`)
+  // Debug logging - add safety check for qNum
+  if (qNum && ([101, 102, 111, 133, 136].includes(qNum) || qNum <= 5)) {
+    console.log(`[mcqParser][SELECT] Q${qNum}: Found ${sequences.length} A-D sequences:`)
+    sequences.forEach((seq, i) => {
+      console.log(`  Sequence ${i + 1}: score=${seq.score}, options=${seq.group.map(g => `${g.label}:"${g.text.substring(0, 20)}"${g.hasTick ? ' ☑' : ''}`).join(', ')}`)
+    })
+    console.log(`[mcqParser][SELECT] Q${qNum}: Selected sequence 1 (highest score)`)
   }
   
   return sequences[0].group
@@ -465,7 +576,7 @@ function validateQuestion(question) {
     errors.push('Missing or incomplete question text')
   }
 
-  // Check options A-D
+  // Check options A-D (validate using options object before conversion)
   const requiredOptions = ['A', 'B', 'C', 'D']
   for (const opt of requiredOptions) {
     if (!question.options[opt] || question.options[opt].trim().length === 0) {
@@ -491,8 +602,30 @@ function validateQuestion(question) {
  * Used when tick is a separate text item
  */
 function detectPositionalTick(pageItems, question, selectedGroup) {
-  // Find tick mark items
-  const tickItems = pageItems.filter(item => TICK_REGEX.test(item.text))
+  // Find tick mark items using enhanced detection
+  const tickItems = pageItems.filter(item => {
+    // Check for standard tick marks first (including emoji variants)
+    if (/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/.test(item.text)) {
+      return true
+    }
+    
+    // Check for standalone "3" that might be a tick mark
+    if (item.text.trim() === '3') {
+      return true
+    }
+    
+    // Check for other single-character tick indicators
+    if (item.text.trim().match(/^[*×x]$/i)) {
+      return true
+    }
+    
+    // Check for parenthetical tick marks
+    if (/^\([*✓✔√x×3]\)$/i.test(item.text.trim())) {
+      return true
+    }
+    
+    return false
+  })
   
   if (tickItems.length === 0) return null
   if (tickItems.length > 1) {
@@ -505,6 +638,8 @@ function detectPositionalTick(pageItems, question, selectedGroup) {
   const tickY = tick.y
   const tickX = tick.x
 
+  console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Found tick "${tick.text}" at (${tickX}, ${tickY})`)
+
   // Find closest option from selected group
   let closestOption = null
   let minDistance = Infinity
@@ -515,6 +650,8 @@ function detectPositionalTick(pageItems, question, selectedGroup) {
     const xDist = Math.abs(opt.x - tickX)
     const distance = yDist + xDist * 0.2  // Y weighted more
 
+    console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Distance to ${opt.label} at (${opt.x}, ${opt.y}): ${distance}`)
+
     if (distance < minDistance && distance < 50) {  // Within 50 units
       minDistance = distance
       closestOption = opt.label
@@ -522,7 +659,7 @@ function detectPositionalTick(pageItems, question, selectedGroup) {
   }
 
   if (closestOption) {
-    console.log(`[mcqParser] Positional tick detected: ${closestOption}`)
+    console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Closest option ${closestOption} (distance: ${minDistance})`)
   }
 
   return closestOption
