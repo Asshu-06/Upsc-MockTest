@@ -119,12 +119,27 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
     // Group into lines using coordinates
     const lines = groupItemsByLine(items, 3) // 3px Y-tolerance
 
+    console.log(`[mcqParser] Page ${pageNumber}: Found ${lines.length} lines of text`)
+    
+    // Log first few lines for debugging
+    lines.slice(0, 10).forEach((line, idx) => {
+      const text = reconstructLineText(line)
+      if (text.trim().length > 0) {
+        console.log(`[mcqParser][LINE-${idx}] "${text}"`)
+      }
+    })
+
     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
       const lineItems = lines[lineIdx]
       const lineText = reconstructLineText(lineItems)
 
       // Skip empty/ignored lines
       if (shouldIgnoreLine(lineText)) continue
+      
+      // Log each non-empty line being processed
+      if (lineText.trim().length > 0) {
+        console.log(`[mcqParser][PROCESS] Line ${lineIdx}: "${lineText}"`)
+      }
 
       // Check for new question
       const questionMatch = detectQuestionNumber(lineText)
@@ -311,33 +326,50 @@ function detectQuestionNumber(text) {
 }
 
 function detectOptionLabel(text) {
-  // First try the standard patterns
-  for (const pattern of OPTION_PATTERNS) {
+  // Log what we're trying to detect
+  console.log(`[detectOptionLabel] Testing: "${text}"`)
+  
+  // Enhanced option detection patterns for Tamil PDFs
+  const patterns = [
+    // Standard patterns
+    /^[\(\[]([A-Da-d])[\)\]]\s*/,    // (A) or [A]
+    /^([A-Da-d])\)\s*/,              // A)
+    /^([A-Da-d])\.\s*/,              // A.
+    /^([A-Da-d])\s+/,                // A followed by space
+    
+    // Spaced patterns
+    /^\s*[\(\[]([A-Da-d])[\)\]]\s*/, // Spaced (A) 
+    /^\s*([A-Da-d])\)\s*/,           // Spaced A)
+    /^\s*([A-Da-d])\.\s*/,           // Spaced A.
+    /^\s*([A-Da-d])\s+/,             // Spaced A + space
+    
+    // Tamil PDF specific - sometimes options appear with extra characters
+    /^\s*\(\s*([A-Da-d])\s*\)\s*/,   // ( A ) with spaces
+    /^\s*([A-Da-d])\s*\)\s*/,        // A ) with space before )
+    /^\s*([A-Da-d])\s*\.\s*/,        // A . with space before .
+    
+    // Very flexible pattern as fallback
+    /^\s*(?:\(?\s*)?([A-Da-d])(?:\s*[\)\.]?\s*)/,
+  ]
+  
+  for (let i = 0; i < patterns.length; i++) {
+    const pattern = patterns[i]
     const match = text.match(pattern)
     if (match) {
-      return {
-        label: match[1].toUpperCase(),
-        remainder: text.slice(match[0].length).trim()
+      const label = match[1].toUpperCase()
+      // Make sure it's A, B, C, or D
+      if (['A', 'B', 'C', 'D'].includes(label)) {
+        const remainder = text.slice(match[0].length).trim()
+        console.log(`[detectOptionLabel] ✓ Pattern ${i} matched: Label="${label}", Remainder="${remainder}"`)
+        return {
+          label: label,
+          remainder: remainder
+        }
       }
     }
   }
-
-  // Enhanced detection for Tamil PDFs and various spacing
-  // Handle patterns like "(A) text", " (B) text", "C) text", etc.
-  const enhancedMatch = text.match(/^\s*[\(\s]*([A-Da-d])[\)\]\s]*\s*(.*)/)
-  if (enhancedMatch && ['A', 'B', 'C', 'D'].includes(enhancedMatch[1].toUpperCase())) {
-    const label = enhancedMatch[1].toUpperCase()
-    const remainder = enhancedMatch[2].trim()
-    
-    // Make sure we have some meaningful text after the label
-    if (remainder.length > 0) {
-      return {
-        label,
-        remainder
-      }
-    }
-  }
-
+  
+  console.log(`[detectOptionLabel] ✗ No pattern matched`)
   return null
 }
 
