@@ -172,21 +172,22 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         console.log(`  Clean text: "${cleanText}"`)
         console.log(`  Has tick: ${hasTick}`)
         
-        // Ensure we have meaningful option text
-        if (cleanText.length < 2) {
-          console.warn(`[mcqParser][OPTION] Q${currentQuestion.question_number} Option ${label} has very short text: "${cleanText}"`)
+        // For Tamil PDFs, ensure we capture meaningful text
+        if (cleanText.length >= 1) { // Accept even single character for Tamil
+          // Record as candidate
+          currentQuestion.option_candidates.push({
+            label: label.toUpperCase(),
+            text: cleanText,
+            lineIdx,
+            y: lineItems[0]?.y || 0,
+            x: lineItems[0]?.x || 0,
+            hasTick,
+            items: lineItems,
+          })
+          console.log(`[mcqParser][SUCCESS] Added option ${label}: "${cleanText.substring(0, 50)}"`)
+        } else {
+          console.warn(`[mcqParser][SKIP] Option ${label} has no meaningful text: "${cleanText}"`)
         }
-
-        // Record as candidate
-        currentQuestion.option_candidates.push({
-          label: label.toUpperCase(),
-          text: cleanText,
-          lineIdx,
-          y: lineItems[0]?.y || 0,
-          x: lineItems[0]?.x || 0,
-          hasTick,
-          items: lineItems,
-        })
         continue
       }
 
