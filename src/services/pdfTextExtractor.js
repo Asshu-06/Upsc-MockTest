@@ -16,14 +16,17 @@
 
 import * as pdfjsLib from 'pdfjs-dist'
 
+const pdfjs = pdfjsLib.getDocument ? pdfjsLib : (pdfjsLib.default || pdfjsLib)
+
 // ─── PDF.js worker setup (done once) ──────────────────────────────────────────
 let workerConfigured = false
 function ensureWorker() {
   if (workerConfigured) return
   try {
-    if (pdfjsLib?.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+    if (typeof window !== 'undefined') {
+      if (pdfjs?.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
+        pdfjs.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.js'
+      }
     }
     workerConfigured = true
   } catch (e) {
@@ -117,7 +120,7 @@ export async function extractPdfText(fileInput, onProgress = null) {
   // ── 2. Load PDF document ───────────────────────────────────────────────────
   let pdfDoc
   try {
-    pdfDoc = await pdfjsLib.getDocument({
+    pdfDoc = await pdfjs.getDocument({
       data: arrayBuffer,
       // Standard fonts directory - served from public folder
       standardFontDataUrl: '/pdfjs/standard_fonts/',

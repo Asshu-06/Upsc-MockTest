@@ -6,60 +6,37 @@
  * PDF → PDF.js → text+coordinates → reading order → question boundaries →
  * option candidates → option group selection → tick detection → validation
  * 
- * DESIGN PRINCIPLES:
- * - Structure-based (NOT language-specific keywords)
- * - Coordinate-aware (handles complex layouts)
- * - Candidate system (NOT "first 4 matches")
- * - No guessing (ambiguous → needs_review)
- * - Preserves original language
- * 
  * SUPPORTS:
- * - Any language with selectable text
- * - Normal MCQs
- * - Assertion/Reason questions
- * - Matching/table questions
- * - Multiline questions/options
- * - Tick marks (embedded + positional)
- * 
- * NO:
- * - Gemini/Vision/OCR
- * - Language-specific rules
- * - Answer guessing
- * - Automatic 1-4 → A-D conversion
+ * - Any language with selectable text (English, Tamil, Hindi, bilingual exams)
+ * - Standard MCQs & Assertion/Reason questions
+ * - Numbered/Roman sub-items (I., II., III., IV.) inside questions
+ * - Bilingual layout (Tamil question before options, English question after options)
+ * - Single-line multiple options (e.g. A) opt1 B) opt2)
+ * - Leading tick marks (e.g. ☑ (D) II, IV, I, III)
+ * - Trailing tick marks & Dingbats fallbacks (e.g. New Delhi 3)
+ * - Degraded / OCR brackets: ( ), (\u0000), (6), (0), 6), ), etc.
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
-import { groupItemsByLine, reconstructLineText, findNearbyItems } from './pdfTextExtractor'
+import { groupItemsByLine, reconstructLineText } from './pdfTextExtractor.js'
 
-// ─── Constants ─────────────────────────────────────────────────────────────
-const TICK_MARKS = ['✓', '✔', '☑', '√', '✅', '☒', '3', '✔️', '✓️', '●', '◉', '⬤', '🗹']  // Add more tick variants including Tamil/Unicode
-const TICK_REGEX = /[✓✔☑√✅☒3●◉⬤🗹]|✔️|✓️/
+// ─── Tick Mark Constants & Regex ──────────────────────────────────────────
+export const TICK_MARKS = ['✓', '✔', '☑', '√', '✅', '☒', '🗹', '✔️', '✓️', '\x13', '\uF0FE', '\uF0FC', '\uF034', '●', '◉', '⬤']
+export const TICK_REGEX = /[✓✔☑√✅☒🗹\x13\uF0FE\uF0FC\uF034]|✔️|✓️/
+const TRAILING_DINGBAT_3 = /(?:\s+3\s*$|(?<=[^\d])\s*3\s*$|\s+3\s+)/
 
-// ─── Question Detection Patterns (Language-agnostic) ──────────────────────
+// ─── Question Detection Patterns ──────────────────────────────────────────
 const QUESTION_PATTERNS = [
-  /^(\d+)\.\s*/,                    // 1.
-  /^(\d+)\)\s*/,                    // 1)
-  /^(\d+):\s*/,                     // 1:
-  /^Q\.?\s*(\d+)\.?\s*/i,          // Q1. or Q.1
-  /^Question\s+(\d+):?\s*/i,        // Question 1:
-  /^\s*(\d+)\.\s+/,                 // Spaced numbering for Tamil PDFs
-  /^\s*(\d+)\)\s*/,                 // Spaced 1) for Tamil PDFs
+  /^\s*Q(?:uestion)?\.?\s*(\d{1,3})[\.\)\:\-]?\s+(.*)/i,
+  /^\s*(\d{1,3})[\.\)\:\-]\s+(.*)/,
+  /^\s*(\d{1,3})\s+([^\d\s\.\)\:].*)/, // Number followed by space without punctuation
 ]
 
-// ─── Option Label Patterns (A-D only, NO 1-4) ────────────────────────────
-const OPTION_PATTERNS = [
-  /^[\(\[]([A-Da-d])[\)\]]\s*/,    // (A) or [A]
-  /^([A-Da-d])\)\s*/,              // A)
-  /^([A-Da-d])\.\s*/,              // A. (allow zero or more spaces)
-  /^([A-Da-d])\s+/,                // A (letter followed by space)
-  /^\s*\([A-Da-d]\)\s*/,           // Spaced (A) pattern for Tamil PDFs
-  /^\s*[A-Da-d]\)\s*/,             // Spaced A) pattern for Tamil PDFs
-]
-
-// ─── Ignore Patterns (Headers, footers, instructions) ────────────────────
+// ─── Ignore Patterns (Headers, footers, instruction blocks) ───────────────
 const IGNORE_PATTERNS = [
   /^page\s+\d+/i,
-  /^\d+\s*$/,
+  /^\[?page\s+\d+\]?/i,
+  /^\d+\s*$/, // Standalone page numbers
   /^exam\s+instructions/i,
   /^instructions/i,
   /^candidate\s+name/i,
@@ -67,6 +44,12 @@ const IGNORE_PATTERNS = [
   /^time\s+allowed/i,
   /^maximum\s+marks/i,
   /^prepared\s+by/i,
+  /^select(?:able)?\s+mcq\s+pdf/i,
+  /^sgsy\s*\|\s*\d+/i,
+  /^tnpsc\s+group/i,
+  /^அனுமதிக்கப்பட்டுள்ள\s*நேரம்/i,
+  /^முக்கிய\s*அறிவுரைகள்/i,
+  /^வினாக்களுக்கு\s*பதிலளிக்குமுன்/i,
   /^©/i,
 ]
 
@@ -110,46 +93,45 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
   let questionCount = 0
 
   // Process each page
-  for (const pageData of pages) {
+  for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
+    const pageData = pages[pageIdx]
     const { pageNumber, items } = pageData
-    const pageTextLength = items.reduce((sum, i) => sum + (i.text?.length || 0), 0)
+    const pageNum = pageNumber || (pageIdx + 1)
 
-    console.log(`[mcqParser] [${processingJobId}] page=${pageNumber}/${totalPages} items=${items.length} textLen=${pageTextLength}`)
-
-    // Group into lines using coordinates
-    const lines = groupItemsByLine(items, 3) // 3px Y-tolerance
-
-    console.log(`[mcqParser] Page ${pageNumber}: Found ${lines.length} lines of text`)
-    
-    // Log first few lines for debugging
-    lines.slice(0, 10).forEach((line, idx) => {
-      const text = reconstructLineText(line)
-      if (text.trim().length > 0) {
-        console.log(`[mcqParser][LINE-${idx}] "${text}"`)
+    // Check if page 1 is a pure cover/instructions page
+    if (pageNum === 1) {
+      const fullPageText = items.map(it => it.text).join(' ')
+      if (/முக்கிய\s*அறிவுரைகள்|கீழ்க்கண்ட\s*அறிவுரைகளை|Important\s*Instructions|DO\s*NOT\s*OPEN/i.test(fullPageText)) {
+        console.log(`[mcqParser] Skipping page 1 as cover/instruction sheet`)
+        continue
       }
-    })
+    }
+
+    // Group into lines using coordinates (4px tolerance)
+    const lines = groupItemsByLine(items, 4)
 
     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
       const lineItems = lines[lineIdx]
-      const lineText = reconstructLineText(lineItems)
+      const rawLineText = reconstructLineText(lineItems)
+      const lineText = rawLineText.replace(/\0/g, ' ').trim()
 
-      // Skip empty/ignored lines
+      // Skip empty or ignored lines
       if (shouldIgnoreLine(lineText)) continue
-      
-      // Log each non-empty line being processed
-      if (lineText.trim().length > 0) {
-        console.log(`[mcqParser][PROCESS] Line ${lineIdx}: "${lineText}"`)
+
+      // Check for standalone tick line
+      if (isStandaloneTickLine(lineText)) {
+        if (currentQuestion && currentQuestion.option_candidates.length > 0) {
+          const lastCand = currentQuestion.option_candidates[currentQuestion.option_candidates.length - 1]
+          lastCand.hasTick = true
+          console.log(`[mcqParser][STANDALONE-TICK] Q${currentQuestion.question_number} attached tick to candidate ${lastCand.label || lastCand.text.substring(0, 20)}`)
+        }
+        continue
       }
 
-      // Check for new question
+      // Check for new question boundary
       const questionMatch = detectQuestionNumber(lineText)
       if (questionMatch) {
         questionCount++
-        
-        // Log first few questions
-        if (questionCount <= 5) {
-          console.log(`[mcqParser] [${processingJobId}] Q${questionMatch.number} detected: "${questionMatch.remainder.substring(0, 60)}..."`)
-        }
 
         // Save previous question
         if (currentQuestion) {
@@ -160,89 +142,49 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
         currentQuestion = {
           question_number: questionMatch.number,
           question_text: questionMatch.remainder,
-          page_number: pageNumber,
+          trailing_text: '',
+          page_number: pageNum,
           options: {},
-          option_candidates: [],  // Track ALL option-like markers
+          option_candidates: [],
           correct_answer: null,
           status: 'valid',
           parser_status: 'ready',
           warnings: [],
           _startLineIdx: lineIdx,
           _startY: lineItems[0]?.y || 0,
+          _optionsFinished: false,
         }
         continue
       }
 
-      // Look for option candidates (DON'T assume they're THE options yet)
-      const optionMatch = detectOptionLabel(lineText)
-      if (optionMatch && currentQuestion) {
-        const { label, remainder } = optionMatch
-        const hasTick = detectTickMark(lineText)
-        const cleanText = removeTickMarks(remainder)
-
-        // Debug for ALL questions to see what's happening
-        console.log(`[mcqParser][OPTION] Q${currentQuestion.question_number} Option ${label}:`)
-        console.log(`  Line: "${lineText}"`)
-        console.log(`  Remainder: "${remainder}"`) 
-        console.log(`  Clean text: "${cleanText}"`)
-        console.log(`  Has tick: ${hasTick}`)
-        
-        // For Tamil PDFs, ensure we capture meaningful text
-        if (cleanText.length >= 1) { // Accept even single character for Tamil
-          // Record as candidate
-          currentQuestion.option_candidates.push({
-            label: label.toUpperCase(),
-            text: cleanText,
-            lineIdx,
-            y: lineItems[0]?.y || 0,
-            x: lineItems[0]?.x || 0,
-            hasTick,
-            items: lineItems,
-          })
-          console.log(`[mcqParser][SUCCESS] Added option ${label}: "${cleanText.substring(0, 50)}"`)
-        } else {
-          console.warn(`[mcqParser][SKIP] Option ${label} has no meaningful text: "${cleanText}"`)
+      // Check if line contains one or more options
+      const extractedOptions = extractOptionsFromLine(lineText, lineItems)
+      if (extractedOptions.length > 0 && currentQuestion) {
+        for (const opt of extractedOptions) {
+          currentQuestion.option_candidates.push(opt)
+        }
+        if (currentQuestion.option_candidates.length >= 4) {
+          currentQuestion._optionsFinished = true
         }
         continue
       }
 
-      // Multiline continuation
+      // Multiline / continuation logic
       if (currentQuestion) {
-        // Check if this line belongs to last candidate
-        const lastCandidate = currentQuestion.option_candidates[currentQuestion.option_candidates.length - 1]
-        
-        // Enhanced multiline logic for Tamil text
-        const isLikelyOptionContinuation = lastCandidate && 
-          lineIdx - lastCandidate.lineIdx <= 3 && // Allow more line gap for Tamil
-          !detectQuestionNumber(lineText) && // Not a new question
-          !detectOptionLabel(lineText) && // Not a new option
-          lineText.trim().length > 0 && // Has content
-          !shouldIgnoreLine(lineText) // Not an ignored line
-        
-        if (isLikelyOptionContinuation) {
-          // Likely continuation of last option
-          const continuationText = lineText.trim()
-          lastCandidate.text = (lastCandidate.text + ' ' + continuationText).trim()
-          
-          console.log(`[mcqParser][MULTILINE] Q${currentQuestion.question_number} Option ${lastCandidate.label}: Added continuation "${continuationText.substring(0, 40)}..."`)
-          
-          // Check for tick on continuation line
-          if (detectTickMark(lineText)) {
-            lastCandidate.hasTick = true
-            lastCandidate.text = removeTickMarks(lastCandidate.text)
-            console.log(`[mcqParser][MULTILINE-TICK] Q${currentQuestion.question_number} Option ${lastCandidate.label}: Tick found on continuation line`)
-          }
+        if (!currentQuestion._optionsFinished && currentQuestion.option_candidates.length === 0) {
+          // Lines before any options belong to initial question text (e.g. I. Dr. A.P.J..., II...., இவற்றுள் :)
+          currentQuestion.question_text = (currentQuestion.question_text + '\n' + lineText).trim()
+        } else if (currentQuestion._optionsFinished) {
+          // Lines after all 4 options belong to secondary/English question text
+          currentQuestion.trailing_text = (currentQuestion.trailing_text + ' ' + lineText).trim()
         } else {
-          // Belongs to question text - but be more selective
-          const isLikelyQuestionContinuation = 
-            !detectOptionLabel(lineText) && // Not an option
-            !detectQuestionNumber(lineText) && // Not a new question
-            lineText.trim().length > 0 && // Has content
-            !shouldIgnoreLine(lineText) // Not ignored
-
-          if (isLikelyQuestionContinuation) {
-            currentQuestion.question_text = (currentQuestion.question_text + ' ' + lineText.trim()).trim()
-            console.log(`[mcqParser][QUESTION-CONTINUATION] Q${currentQuestion.question_number}: Added "${lineText.trim().substring(0, 40)}..."`)
+          // Options are currently being gathered: continuation of last option
+          const lastCand = currentQuestion.option_candidates[currentQuestion.option_candidates.length - 1]
+          const tickInLine = detectTickMark(lineText)
+          const cleanText = removeTickMarks(lineText)
+          lastCand.text = (lastCand.text + ' ' + cleanText).trim()
+          if (tickInLine) {
+            lastCand.hasTick = true
           }
         }
       }
@@ -251,7 +193,7 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
 
   // Finalize last question
   if (currentQuestion) {
-    allQuestions.push(finalizeQuestion(currentQuestion, pages[pages.length - 1].items, globalWarnings, processingJobId))
+    allQuestions.push(finalizeQuestion(currentQuestion, pages[pages.length - 1]?.items || [], globalWarnings, processingJobId))
   }
 
   // Sort by question number
@@ -261,31 +203,9 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
   const needsReviewCount = allQuestions.filter(q => q.parser_status === 'needs_review').length
 
   console.log('[mcqParser] ═══ PARSING COMPLETE ═══')
-  console.log('[mcqParser] processingJobId:', processingJobId)
   console.log('[mcqParser] Total questions:', allQuestions.length)
   console.log('[mcqParser] Valid:', validCount)
   console.log('[mcqParser] Needs review:', needsReviewCount)
-  
-  // Log first 10 question diagnostics (check both formats for compatibility)
-  console.log('[mcqParser] ═══ FIRST 10 QUESTION DIAGNOSTICS ═══')
-  allQuestions.slice(0, 10).forEach(q => {
-    console.log(`[mcqParser][VALIDATION] Q${q.question_number}:`, {
-      question: !!q.question_text && q.question_text.length >= 3,
-      questionPreview: q.question_text?.substring(0, 60) + '...',
-      A: !!(q.option_a || q.options?.A),
-      A_preview: (q.option_a || q.options?.A)?.substring(0, 40),
-      B: !!(q.option_b || q.options?.B),
-      B_preview: (q.option_b || q.options?.B)?.substring(0, 40),
-      C: !!(q.option_c || q.options?.C),
-      C_preview: (q.option_c || q.options?.C)?.substring(0, 40),
-      D: !!(q.option_d || q.options?.D),
-      D_preview: (q.option_d || q.options?.D)?.substring(0, 40),
-      correct: q.correct_option || q.correct_answer,
-      status: q.parser_status,
-      errors: q.errors,
-      warnings: q.warnings
-    })
-  })
 
   return {
     processingJobId,
@@ -303,404 +223,312 @@ export async function parseMcqQuestions(extractionResult, processingJobId = 'unk
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
-function shouldIgnoreLine(text) {
+export function shouldIgnoreLine(text) {
   if (!text || text.trim().length === 0) return true
   const trimmed = text.trim()
+  if (/^[\u0000\s\d\.\[\]\:]+$/.test(trimmed) && trimmed.length <= 4) return true
   return IGNORE_PATTERNS.some(p => p.test(trimmed))
 }
 
-function detectQuestionNumber(text) {
-  for (const pattern of QUESTION_PATTERNS) {
-    const match = text.match(pattern)
-    if (match) {
-      const num = parseInt(match[1], 10)
-      if (num > 0 && num <= 500) {  // Reasonable range
-        return {
-          number: num,
-          remainder: text.slice(match[0].length).trim()
-        }
-      }
-    }
-  }
-  return null
+export function isStandaloneTickLine(text) {
+  if (!text) return false
+  const t = text.replace(/\0/g, '').trim()
+  if (!t) return false
+  return /^[✓✔☑√✅☒🗹\x13\uF0FE\uF0FC\uF0343]$/.test(t) || /^(?:✔️|✓️)$/.test(t)
 }
 
-function detectOptionLabel(text) {
-  // Log what we're trying to detect
-  console.log(`[detectOptionLabel] Testing: "${text}"`)
-  
-  // Enhanced option detection patterns for Tamil PDFs
-  const patterns = [
-    // Standard patterns
-    /^[\(\[]([A-Da-d])[\)\]]\s*/,    // (A) or [A]
-    /^([A-Da-d])\)\s*/,              // A)
-    /^([A-Da-d])\.\s*/,              // A.
-    /^([A-Da-d])\s+/,                // A followed by space
-    
-    // Spaced patterns
-    /^\s*[\(\[]([A-Da-d])[\)\]]\s*/, // Spaced (A) 
-    /^\s*([A-Da-d])\)\s*/,           // Spaced A)
-    /^\s*([A-Da-d])\.\s*/,           // Spaced A.
-    /^\s*([A-Da-d])\s+/,             // Spaced A + space
-    
-    // Tamil PDF specific - sometimes options appear with extra characters
-    /^\s*\(\s*([A-Da-d])\s*\)\s*/,   // ( A ) with spaces
-    /^\s*([A-Da-d])\s*\)\s*/,        // A ) with space before )
-    /^\s*([A-Da-d])\s*\.\s*/,        // A . with space before .
-    
-    // Very flexible pattern as fallback
-    /^\s*(?:\(?\s*)?([A-Da-d])(?:\s*[\)\.]?\s*)/,
-  ]
-  
-  for (let i = 0; i < patterns.length; i++) {
-    const pattern = patterns[i]
-    const match = text.match(pattern)
+export function detectQuestionNumber(text) {
+  const cleaned = text.replace(/\0/g, '').trim()
+  for (const pattern of QUESTION_PATTERNS) {
+    const match = cleaned.match(pattern)
     if (match) {
-      const label = match[1].toUpperCase()
-      // Make sure it's A, B, C, or D
-      if (['A', 'B', 'C', 'D'].includes(label)) {
-        const remainder = text.slice(match[0].length).trim()
-        console.log(`[detectOptionLabel] ✓ Pattern ${i} matched: Label="${label}", Remainder="${remainder}"`)
+      const num = parseInt(match[1], 10)
+      if (num > 0 && num <= 500) {
+        const remainder = match[2]?.trim() || ''
+        // Avoid instruction sentences
+        if (/வினாத்\s*தொகுப்பு|விடைத்தாள்|பதிவு\s*எண்|மணி/i.test(remainder)) {
+          continue
+        }
         return {
-          label: label,
+          number: num,
           remainder: remainder
         }
       }
     }
   }
-  
-  console.log(`[detectOptionLabel] ✗ No pattern matched`)
   return null
 }
 
-function detectTickMark(text) {
-  // First check for standard Unicode tick marks (including emoji variants)
-  if (/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/.test(text)) {
-    return true
+/**
+ * Extract all options present in a line of text.
+ * Can detect 1, 2, or 4 options on a single line.
+ * Handles leading ticks, e.g. "☑ (D) II, IV, I, III"
+ */
+export function extractOptionsFromLine(lineText, lineItems = []) {
+  const text = lineText.replace(/\0/g, ' ').trim()
+  if (!text) return []
+
+  const yCoord = lineItems[0]?.y || 0
+  const xCoord = lineItems[0]?.x || 0
+
+  // 1. Precise A) B) C) D) or (A) (B) (C) (D) or A. B. C. D. with optional leading/trailing ticks
+  const headerRegex = new RegExp(
+    '(?:^|\\s+)(?:(' + TICK_REGEX.source + ')\\s*)?(?:\\(([A-Da-d])\\)|([A-Da-d])\\)|(?<=(?:^|\\s{2,}))([A-Da-d])\\.)\\s*(?:(' + TICK_REGEX.source + ')\\s*)?',
+    'g'
+  )
+
+  const matches = [...text.matchAll(headerRegex)]
+  if (matches.length > 0) {
+    // Guard against initials like "Dr. A. P. J."
+    if (matches.length === 1 && matches[0][4]) {
+      const beforeMatch = text.substring(0, matches[0].index)
+      if (/Dr\.|Mr\.|Prof\.|Shri|Smt/i.test(beforeMatch)) {
+        return []
+      }
+    }
+
+    const results = []
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i]
+      const leadingTick = m[1]
+      const label = (m[2] || m[3] || m[4]).toUpperCase()
+      const trailingTick = m[5]
+
+      const contentStart = m.index + m[0].length
+      let contentEnd = text.length
+      if (i + 1 < matches.length) {
+        contentEnd = matches[i + 1].index
+      }
+
+      let rawContent = text.substring(contentStart, contentEnd).trim()
+
+      const hasTick = !!leadingTick || !!trailingTick || 
+        detectTickMark(rawContent) || 
+        TRAILING_DINGBAT_3.test(rawContent)
+
+      let cleanText = removeTickMarks(rawContent)
+
+      results.push({
+        label,
+        text: cleanText,
+        y: yCoord,
+        x: xCoord + (i * 100),
+        hasTick
+      })
+    }
+    return results
   }
-  
-  // Enhanced "3" tick mark detection for Tamil PDFs
-  // "3" appears to be used as a tick mark in this Tamil TNPSC exam
-  
-  // Pattern 1: "3" at the end of text (most common case in Tamil exams)
-  if (/\s3\s*$/.test(text)) {
-    return true
+
+  // 2. Degraded / OCR brackets / markers (e.g. ( ), (6), 6), ), etc.)
+  const degradedSplitter = /(?:^|\s+)(?:([✓✔☑√✅☒🗹\x13\uF0FE\uF0FC\uF034]|✔️|✓️)\s*)?(?:\(\s*[\d\w\s]*\)|\[\s*[\d\w\s]*\]|[0-9A-Za-z\u0B80-\u0BFF]?\)|(?:ஸி|ஸிரில|ரி|ல|மஜி|மே)\s*[\.\)]?)\s+/g
+  const dMatches = [...text.matchAll(degradedSplitter)]
+  if (dMatches.length > 0) {
+    const results = []
+    for (let i = 0; i < dMatches.length; i++) {
+      const m = dMatches[i]
+      const leadingTick = m[1]
+      const start = m.index + m[0].length
+      let end = text.length
+      if (i + 1 < dMatches.length) {
+        end = dMatches[i + 1].index
+      }
+      const rawText = text.substring(start, end).trim()
+      if (rawText.length > 0) {
+        const hasTick = !!leadingTick || detectTickMark(rawText) || TRAILING_DINGBAT_3.test(rawText)
+        const cleanText = removeTickMarks(rawText)
+
+        results.push({
+          label: null,
+          text: cleanText,
+          y: yCoord,
+          x: xCoord + (i * 100),
+          hasTick
+        })
+      }
+    }
+    if (results.length > 0) return results
   }
-  
-  // Pattern 2: Standalone "3" surrounded by spaces  
-  if (/\s3\s/.test(text)) {
-    return true
-  }
-  
-  // Pattern 3: "3" at the beginning after option label (like "A) Mumbai 3")
-  if (/^[A-Da-d][)\]\.\s]+.*\s3\s*$/.test(text)) {
-    return true
-  }
-  
-  // Pattern 4: "3" right after option text without much space
-  if (/[^\d]\s*3$/.test(text) && !/\d+3$/.test(text)) {
-    return true
-  }
-  
-  // Pattern 5: Check for other common Tamil/Indian tick representations
-  if (/[॔।॥॰᠎]/.test(text)) {
-    return true
-  }
-  
-  // Pattern 6: Check for parenthetical marks like (✓) or (*)
-  if (/\([*✓✔√x×3]\)/i.test(text)) {
-    return true
-  }
-  
-  // Pattern 7: Check for Tamil-specific tick patterns
-  if (/[\u0B80-\u0BFF].*3/.test(text) || /3.*[\u0B80-\u0BFF]/.test(text)) {
-    return true
-  }
-  
+
+  return []
+}
+
+export function detectTickMark(text) {
+  if (!text) return false
+  if (TICK_REGEX.test(text)) return true
+  if (TRAILING_DINGBAT_3.test(text)) return true
+  if (/\([*✓✔√x×3]\)/i.test(text)) return true
   return false
 }
 
-function removeTickMarks(text) {
-  // Remove standard tick marks including emoji variants
-  let cleaned = text.replace(/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/g, '').trim()
-  
-  // Remove "3" tick marks more carefully
-  // Remove "3" at the end
-  cleaned = cleaned.replace(/\s3\s*$/, '').trim()
-  
-  // Remove standalone "3" surrounded by spaces
-  cleaned = cleaned.replace(/\s3\s/g, ' ').trim()
-  
-  // Remove Tamil/Indian tick marks
-  cleaned = cleaned.replace(/[॔।॥॰᠎]/g, '').trim()
-  
-  // Remove parenthetical marks
-  cleaned = cleaned.replace(/\([*✓✔√x×]\)/gi, '').trim()
-  
+export function removeTickMarks(text) {
+  if (!text) return ''
+  let cleaned = text.replace(new RegExp(TICK_REGEX.source, 'g'), '').trim()
+  cleaned = cleaned.replace(/(?:\s+3\s*$|(?<=[^\d])\s*3\s*$)/g, '').trim()
+  cleaned = cleaned.replace(/\s+3\s+/g, ' ').trim()
+  cleaned = cleaned.replace(/\([*✓✔√x×3]\)/gi, '').trim()
   return cleaned
 }
 
 // ─── Finalize Question ────────────────────────────────────────────────────
 function finalizeQuestion(question, pageItems, globalWarnings, processingJobId) {
   const qNum = question.question_number
-
-  // Log for ALL questions to see what options are detected
-  console.log(`\n[mcqParser] [${processingJobId}] ═══ Q${qNum} FINALIZATION ═══`)
-  console.log(`[mcqParser] Question text (first 100 chars):`, question.question_text.substring(0, 100))
-  console.log(`[mcqParser] Candidates found:`, question.option_candidates.length)
-  question.option_candidates.forEach((c, i) => {
-    console.log(`  [${i}] ${c.label}: "${c.text.substring(0, 60)}" ${c.hasTick ? '☑' : ''}`)
-  })
+  const candidates = question.option_candidates || []
 
   // SELECT THE ACTUAL OPTION GROUP from candidates
-  const selectedGroup = selectOptionGroup(question.option_candidates, qNum)
+  const selectedGroup = selectOptionGroup(candidates, qNum)
 
-  if (!selectedGroup || selectedGroup.length !== 4) {
-    question.parser_status = 'needs_review'
-    question.warnings.push(`Found ${selectedGroup?.length || 0} options, expected 4`)
-    
-    // Still record what we found
-    selectedGroup?.forEach(opt => {
-      question.options[opt.label] = opt.text
-      if (opt.hasTick && !question.correct_answer) {
-        question.correct_answer = opt.label
-        console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${opt.label} marked as correct (embedded tick)`)
-      }
-    })
-  } else {
-    // Valid group of 4
-    selectedGroup.forEach(opt => {
-      question.options[opt.label] = opt.text
-      if (opt.hasTick) {
-        if (question.correct_answer) {
-          question.parser_status = 'needs_review'
-          question.warnings.push('Multiple tick marks detected')
-        } else {
-          question.correct_answer = opt.label
-          console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${opt.label} marked as correct (embedded tick)`)
-        }
+  let optA = '', optB = '', optC = '', optD = ''
+  let correctOpt = null
+
+  if (selectedGroup && selectedGroup.length === 4) {
+    optA = selectedGroup[0].text
+    optB = selectedGroup[1].text
+    optC = selectedGroup[2].text
+    optD = selectedGroup[3].text
+
+    const letters = ['A', 'B', 'C', 'D']
+    selectedGroup.forEach((opt, idx) => {
+      if (opt.hasTick && !correctOpt) {
+        correctOpt = opt.label || letters[idx]
       }
     })
 
-    // Try positional tick detection if no tick found
-    if (!question.correct_answer) {
-      const posTickResult = detectPositionalTick(pageItems, question, selectedGroup)
-      if (posTickResult) {
-        question.correct_answer = posTickResult
-        console.log(`[mcqParser][TICK DETECTED] Q${qNum}: Option ${posTickResult} marked as correct (positional tick)`)
+    // If no embedded/adjacent tick found, try positional tick search
+    if (!correctOpt) {
+      const posTick = detectPositionalTick(pageItems, question, selectedGroup)
+      if (posTick) {
+        correctOpt = posTick
+        console.log(`[mcqParser][POSITIONAL] Q${qNum} tick matched to ${posTick}`)
       }
     }
+  } else {
+    // Fewer than 4 options or ambiguous candidates
+    question.warnings.push(`Found ${candidates.length} options, expected 4`)
+    const letters = ['A', 'B', 'C', 'D']
+    candidates.slice(0, 4).forEach((opt, idx) => {
+      if (idx === 0) optA = opt.text
+      if (idx === 1) optB = opt.text
+      if (idx === 2) optC = opt.text
+      if (idx === 3) optD = opt.text
+      if (opt.hasTick && !correctOpt) {
+        correctOpt = opt.label || letters[idx]
+      }
+    })
   }
 
-  // Validate
+  // Populate options
+  question.options = { A: optA, B: optB, C: optC, D: optD }
+  question.option_a = optA
+  question.option_b = optB
+  question.option_c = optC
+  question.option_d = optD
+  question.correct_option = correctOpt
+  question.correct_answer = correctOpt
+
+  // Validation
   const validation = validateQuestion(question)
   if (!validation.isValid) {
     question.parser_status = 'needs_review'
+    question.status = 'needs_review'
     question.warnings.push(...validation.errors)
+  } else {
+    question.parser_status = 'ready'
+    question.status = 'valid'
   }
 
-  // Log final result for test questions
-  if ([101, 102, 111, 133, 136].includes(qNum)) {
-    console.log(`[mcqParser] Final Q${qNum}:`)
-    console.log(`  A: "${question.options.A?.substring(0, 80)}"`)
-    console.log(`  B: "${question.options.B?.substring(0, 80)}"`)
-    console.log(`  C: "${question.options.C?.substring(0, 80)}"`)
-    console.log(`  D: "${question.options.D?.substring(0, 80)}"`)
-    console.log(`  Correct: ${question.correct_answer || 'none'}`)
-    console.log(`  Status: ${question.parser_status}`)
-  }
-
-  // CONVERT options object to flat fields for database compatibility
-  // Database expects: option_a, option_b, option_c, option_d
-  // Parser uses: options.A, options.B, options.C, options.D
-  question.option_a = question.options.A || ''
-  question.option_b = question.options.B || ''
-  question.option_c = question.options.C || ''
-  question.option_d = question.options.D || ''
-
-  // Map correct_answer to correct_option for database
-  question.correct_option = question.correct_answer
-
-  // Add page_number from page_number field
-  if (!question.page_number) {
-    question.page_number = question.page_number || 1
-  }
-
-  // Detect if content is Tamil and populate Tamil fields
-  // Tamil text detection: contains Tamil Unicode characters
+  // Bilingual text support (Tamil vs English)
   const containsTamil = (text) => text && /[\u0B80-\u0BFF]/.test(text)
-  
-  if (containsTamil(question.question_text)) {
-    question.question_text_tamil = question.question_text
-    // If question is Tamil, keep original as Tamil and don't duplicate in English field
+  const initialText = (question.question_text || '').trim()
+  const trailingText = (question.trailing_text || '').trim()
+
+  if (containsTamil(initialText)) {
+    question.tamil_question = initialText
+    question.question_text_tamil = initialText
+    if (trailingText) {
+      question.english_question = trailingText
+    }
+  } else {
+    question.english_question = initialText
+    if (trailingText) {
+      question.tamil_question = trailingText
+      question.question_text_tamil = trailingText
+    }
   }
-  
-  // Check each option for Tamil content
-  ['A', 'B', 'C', 'D'].forEach((letter, index) => {
-    const optionText = question.options[letter] || ''
-    const fieldName = `option_${letter.toLowerCase()}`
-    const tamilFieldName = `option_${letter.toLowerCase()}_tamil`
-    
-    if (containsTamil(optionText)) {
-      // If option contains Tamil, store in Tamil field
-      question[tamilFieldName] = optionText
-      // Keep the original in the regular field too for fallback
-      question[fieldName] = optionText
+
+  // Unified question text
+  question.question_text = [question.tamil_question, question.english_question]
+    .filter(Boolean)
+    .join('\n')
+    .trim() || initialText
+
+  // Populate Tamil option fields if options contain Tamil
+  ;['a', 'b', 'c', 'd'].forEach(letter => {
+    const textVal = question[`option_${letter}`]
+    if (containsTamil(textVal)) {
+      question[`option_${letter}_tamil`] = textVal
     }
   })
 
-  // Cleanup internal fields
+  // Cleanup temporary internal fields
   delete question.option_candidates
   delete question._startLineIdx
   delete question._startY
-  delete question.options  // Remove options object after converting to flat fields
-  delete question.correct_answer  // Remove after mapping to correct_option
+  delete question._optionsFinished
+  delete question.trailing_text
 
   return question
 }
 
-// ─── Select Option Group (CRITICAL FUNCTION) ──────────────────────────────
-/**
- * Select the actual A-D option group from all candidates
- * This prevents false positives from assertion/reason labels, table items, etc.
- */
+// ─── Select Option Group ──────────────────────────────────────────────────
 function selectOptionGroup(candidates, qNum) {
   if (!candidates || candidates.length === 0) return null
 
-  // Find all A-D sequences
-  const sequences = []
-  
-  for (let i = 0; i < candidates.length; i++) {
-    if (candidates[i].label === 'A') {
-      // Potential start of A-D sequence
-      const group = []
-      const expected = ['A', 'B', 'C', 'D']
-      let idx = i
-      
-      for (const expLabel of expected) {
-        if (idx < candidates.length && candidates[idx].label === expLabel) {
-          group.push(candidates[idx])
-          idx++
-        } else {
-          break
-        }
-      }
-      
-      if (group.length === 4) {
-        sequences.push({ startIdx: i, group, score: scoreOptionGroup(group) })
-      }
+  // If exactly 4 candidates exist, that's our group
+  if (candidates.length === 4) {
+    return candidates
+  }
+
+  // Check if there is an explicit A, B, C, D sequence
+  for (let i = 0; i <= candidates.length - 4; i++) {
+    if (candidates[i].label === 'A' &&
+        candidates[i + 1]?.label === 'B' &&
+        candidates[i + 2]?.label === 'C' &&
+        candidates[i + 3]?.label === 'D') {
+      return candidates.slice(i, i + 4)
     }
   }
 
-  if (sequences.length === 0) {
-    // No complete A-D sequence found
-    return null
+  // If more than 4 candidates exist (e.g. matching items table + final options):
+  // Check if any slice of 4 contains a tick mark
+  for (let i = candidates.length - 4; i >= 0; i--) {
+    const slice = candidates.slice(i, i + 4)
+    if (slice.some(opt => opt.hasTick)) {
+      return slice
+    }
   }
 
-  if (sequences.length === 1) {
-    // Only one A-D sequence - use it
-    return sequences[0].group
+  // Fallback: the last 4 candidates (options are at the bottom of question)
+  if (candidates.length >= 4) {
+    return candidates.slice(-4)
   }
 
-  // Multiple A-D sequences found (e.g., Assertion/Reason + actual options)
-  // Select the one with best score
-  sequences.sort((a, b) => b.score - a.score)
-  
-  // Debug logging - add safety check for qNum
-  if (qNum && ([101, 102, 111, 133, 136].includes(qNum) || qNum <= 5)) {
-    console.log(`[mcqParser][SELECT] Q${qNum}: Found ${sequences.length} A-D sequences:`)
-    sequences.forEach((seq, i) => {
-      console.log(`  Sequence ${i + 1}: score=${seq.score}, options=${seq.group.map(g => `${g.label}:"${g.text.substring(0, 20)}"${g.hasTick ? ' ☑' : ''}`).join(', ')}`)
-    })
-    console.log(`[mcqParser][SELECT] Q${qNum}: Selected sequence 1 (highest score)`)
-  }
-  
-  return sequences[0].group
-}
-
-// ─── Score Option Group ───────────────────────────────────────────────────
-/**
- * Score an option group to determine if it's likely the actual answer choices
- * Higher score = more likely to be the real options
- * Enhanced for Tamil language PDFs
- */
-function scoreOptionGroup(group) {
-  let score = 0
-
-  // Check vertical proximity (options should be close together)
-  const yPositions = group.map(opt => opt.y)
-  const maxYDiff = Math.max(...yPositions) - Math.min(...yPositions)
-  if (maxYDiff < 150) score += 40  // Increased for Tamil PDFs
-  else if (maxYDiff < 300) score += 20  // More lenient for multi-line Tamil
-
-  // Check text length (actual options tend to be substantial)
-  const avgLength = group.reduce((sum, opt) => sum + opt.text.length, 0) / 4
-  if (avgLength > 15) score += 30  // Tamil text may be longer
-  else if (avgLength > 8) score += 15
-  else if (avgLength > 3) score += 10
-
-  // Check for Tamil Unicode characters (indicates actual content)
-  const hasTamilText = group.some(opt => /[\u0B80-\u0BFF]/.test(opt.text))
-  if (hasTamilText) score += 25
-
-  // Check for common option indicators
-  const hasNumbers = group.some(opt => /\d/.test(opt.text))
-  if (hasNumbers) score += 10
-
-  // Penalize very short text (likely labels, not answers)
-  const hasVeryShort = group.some(opt => opt.text.length < 2)
-  if (hasVeryShort) score -= 30
-
-  // Bonus if any option has a tick (indicates answer section)
-  if (group.some(opt => opt.hasTick)) score += 35
-
-  // Check for proper order (A, B, C, D should be in sequence)
-  const labels = group.map(opt => opt.label).join('')
-  if (labels === 'ABCD') score += 20
-
-  // Penalize if options are too similar (likely repeated headers)
-  const uniqueTexts = new Set(group.map(opt => opt.text.trim())).size
-  if (uniqueTexts < 3) score -= 20
-
-  return score
+  return candidates
 }
 
 // ─── Validate Question ────────────────────────────────────────────────────
 function validateQuestion(question) {
   const errors = []
 
-  // Check question text
-  if (!question.question_text || question.question_text.trim().length < 5) {
+  if (!question.question_text || question.question_text.trim().length < 2) {
     errors.push('Missing or incomplete question text')
   }
 
-  // Check options A-D (validate using options object before conversion)
   const requiredOptions = ['A', 'B', 'C', 'D']
   for (const opt of requiredOptions) {
     const optionText = question.options[opt]
     if (!optionText || optionText.trim().length < 1) {
       errors.push(`Missing Option ${opt}`)
     }
-    // Check for placeholder text that indicates failed extraction
-    else if (optionText.includes('Option A...') || optionText.includes('Option B...') || 
-             optionText.includes('Option C...') || optionText.includes('Option D...')) {
-      errors.push(`Option ${opt} contains placeholder text`)
-    }
-  }
-
-  // Check for reasonable option length distribution
-  const optionLengths = requiredOptions.map(opt => (question.options[opt] || '').length)
-  const avgLength = optionLengths.reduce((sum, len) => sum + len, 0) / 4
-  
-  // For Tamil text, we expect reasonable length
-  if (avgLength < 3) {
-    errors.push('Options too short - possible extraction failure')
-  }
-
-  // Correct answer optional (can be added later by admin)
-  // But if present, must be valid
-  if (question.correct_answer && !requiredOptions.includes(question.correct_answer)) {
-    errors.push('Invalid correct answer')
   }
 
   return {
@@ -710,70 +538,45 @@ function validateQuestion(question) {
 }
 
 // ─── Positional Tick Detection ───────────────────────────────────────────
-/**
- * Detect tick marks using PDF coordinates
- * Used when tick is a separate text item
- */
 function detectPositionalTick(pageItems, question, selectedGroup) {
-  // Find tick mark items using enhanced detection
-  const tickItems = pageItems.filter(item => {
-    // Check for standard tick marks first (including emoji variants)
-    if (/[✓✔☑√✅☒●◉⬤🗹]|✔️|✓️/.test(item.text)) {
-      return true
-    }
-    
-    // Check for standalone "3" that might be a tick mark
-    if (item.text.trim() === '3') {
-      return true
-    }
-    
-    // Check for other single-character tick indicators
-    if (item.text.trim().match(/^[*×x]$/i)) {
-      return true
-    }
-    
-    // Check for parenthetical tick marks
-    if (/^\([*✓✔√x×3]\)$/i.test(item.text.trim())) {
-      return true
-    }
-    
-    return false
-  })
-  
-  if (tickItems.length === 0) return null
-  if (tickItems.length > 1) {
-    // Multiple ticks - ambiguous
-    question.warnings.push('Multiple tick marks found (ambiguous)')
+  if (!pageItems || pageItems.length === 0 || !selectedGroup || selectedGroup.length === 0) {
     return null
   }
 
-  const tick = tickItems[0]
-  const tickY = tick.y
-  const tickX = tick.x
+  const qY = question._startY || 0
 
-  console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Found tick "${tick.text}" at (${tickX}, ${tickY})`)
-
-  // Find closest option from selected group
-  let closestOption = null
-  let minDistance = Infinity
-
-  for (const opt of selectedGroup) {
-    // Calculate distance (Y more important than X)
-    const yDist = Math.abs(opt.y - tickY)
-    const xDist = Math.abs(opt.x - tickX)
-    const distance = yDist + xDist * 0.2  // Y weighted more
-
-    console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Distance to ${opt.label} at (${opt.x}, ${opt.y}): ${distance}`)
-
-    if (distance < minDistance && distance < 50) {  // Within 50 units
-      minDistance = distance
-      closestOption = opt.label
+  // Filter tick items located near this question (within 200px below startY)
+  const nearbyTicks = pageItems.filter(item => {
+    if (!detectTickMark(item.text)) return false
+    // If we have startY, check that tick is in the vertical range
+    if (qY > 0) {
+      const dy = qY - item.y
+      return dy >= -20 && dy <= 300 // within question vertical area
     }
+    return true
+  })
+
+  if (nearbyTicks.length === 0) return null
+
+  // Find closest tick to an option candidate
+  let bestOption = null
+  let minDistance = Infinity
+  const letters = ['A', 'B', 'C', 'D']
+
+  for (const tick of nearbyTicks) {
+    selectedGroup.forEach((opt, idx) => {
+      const optY = opt.y || 0
+      const optX = opt.x || 0
+      const yDist = Math.abs(optY - tick.y)
+      const xDist = Math.abs(optX - tick.x)
+      const dist = yDist + xDist * 0.2
+
+      if (dist < minDistance && dist < 80) {
+        minDistance = dist
+        bestOption = opt.label || letters[idx]
+      }
+    })
   }
 
-  if (closestOption) {
-    console.log(`[mcqParser][POSITIONAL] Q${question.question_number}: Closest option ${closestOption} (distance: ${minDistance})`)
-  }
-
-  return closestOption
+  return bestOption
 }
