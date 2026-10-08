@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, HelpCircle, BookMarked, Newspaper,
   BellRing, Users, BarChart3, Brain, LogOut, Settings,
-  ChevronDown, ChevronRight, BookOpen, Upload, Zap,
+  ChevronDown, ChevronRight, BookOpen, Zap, FileJson,
   ShieldCheck, ClipboardList, Menu, X,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
@@ -21,7 +21,7 @@ const SECTIONS = [
     items: [
       { label: 'Papers / PYQs',   path: '/admin/papers',        icon: FileText },
       { label: 'Questions',       path: '/admin/questions',      icon: HelpCircle },
-      { label: 'PDF Import',      path: '/admin/pdf-import',     icon: Upload },
+      { label: 'PDF to JSON',     path: '/admin/pdf-to-json',    icon: FileJson },
       { label: 'Syllabus',        path: '/admin/syllabus',       icon: BookMarked },
       { label: 'Quick Recall',    path: '/admin/recall',         icon: Brain },
     ],

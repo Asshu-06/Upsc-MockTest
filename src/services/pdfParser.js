@@ -1,5 +1,4 @@
-import { extractPdfText } from './pdfTextExtractor.js'
-import { parseMcqQuestions } from './mcqParser.js'
+import { extractQuestionsFromPdf, mapQuestionsForPreview } from './pdfExtractionPipeline.js'
 
 export class PdfParser {
   constructor() {
@@ -13,27 +12,16 @@ export class PdfParser {
   async extractFromFile(file) {
     try {
       this.sourcePdfName = file.name
-      const arrayBuffer = await file.arrayBuffer()
-      const extractionResult = await extractPdfText(arrayBuffer, file.name)
+      const parsed = await extractQuestionsFromPdf(file, {
+        jobId: 'admin-import',
+        fileName: file.name,
+      })
+
+      this.pages = parsed.pages || []
+      this.extractedText = parsed.fullText || ''
       
-      this.pages = extractionResult.pages || []
-      this.extractedText = this.pages.map(p => `[PAGE ${p.pageNumber}]\n` + (p.items || []).map(i => i.text).join(' ')).join('\n\n')
-      
-      const parsed = await parseMcqQuestions(extractionResult, 'admin-import', file.name)
-      
-      this.questions = (parsed.questions || []).map(q => ({
-        question_number: q.question_number,
-        question_text: q.question_text,
-        tamil_question: q.tamil_question || null,
-        english_question: q.english_question || null,
-        option_a: q.option_a || '',
-        option_b: q.option_b || '',
-        option_c: q.option_c || '',
-        option_d: q.option_d || '',
-        options: q.options || { A: q.option_a, B: q.option_b, C: q.option_c, D: q.option_d },
-        correct_option: q.correct_option || null,
-        correct_answer: q.correct_option || null,
-        page_number: q.page_number || 1,
+      this.questions = mapQuestionsForPreview(parsed.questions || []).map(q => ({
+        ...q,
         source_pdf: this.sourcePdfName,
         extraction_notes: (q.warnings || []).join('; ') || '',
         status: q.parser_status || 'ready'
@@ -41,10 +29,12 @@ export class PdfParser {
       
       return {
         success: true,
-        totalPages: extractionResult.totalPages || this.pages.length,
+        totalPages: parsed.totalPages || this.pages.length,
         extractedTextLength: this.extractedText.length,
+        debugText: this.extractedText.slice(0, 4000),
+        fullText: this.extractedText,
         questions: this.questions,
-        warnings: this.getWarnings(),
+        warnings: [...(parsed.warnings || []), ...this.getWarnings()],
         sourcePdf: this.sourcePdfName
       }
     } catch (error) {
@@ -69,11 +59,11 @@ export class PdfParser {
     if (pageMatch === -1) return 1
     
     const beforeText = this.extractedText.substring(0, pageMatch)
-    const pageMarkers = beforeText.match(/\[PAGE (\d+)\]/g)
+    const pageMarkers = beforeText.match(/--- PAGE (\d+) ---|\[PAGE (\d+)\]/g)
     
     if (pageMarkers && pageMarkers.length > 0) {
       const lastPageMarker = pageMarkers[pageMarkers.length - 1]
-      const match = lastPageMarker.match(/\[PAGE (\d+)\]/)
+      const match = lastPageMarker.match(/(\d+)/)
       if (match) {
         return parseInt(match[1], 10)
       }

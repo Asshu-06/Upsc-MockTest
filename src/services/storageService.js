@@ -53,5 +53,24 @@ export const storageService = {
     } catch (e) {
       return null
     }
+  },
+
+  /**
+   * Prefer a signed URL (works for private buckets), then fall back to public URL.
+   */
+  async getPdfUrl(path) {
+    if (!path) return null
+    const BBUCKET_NAME = 'question-papers'
+
+    try {
+      const { data, error } = await supabase.storage
+        .from(BBUCKET_NAME)
+        .createSignedUrl(path, 3600)
+      if (!error && data?.signedUrl) return data.signedUrl
+    } catch (e) {
+      console.warn('[storageService] Signed URL failed, trying public URL', e)
+    }
+
+    return this.getPdfPublicUrl(path)
   }
 }

@@ -187,12 +187,14 @@ export const questionService = {
   },
 
   async saveExtractedDocument(docMetadata) {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError) throw authError
+    if (!user) throw new Error('Sign in before saving extracted questions.')
 
     const { data, error } = await supabase
       .from('documents')
       .insert([{
-        user_id: user?.id || null,
+        user_id: user.id,
         paper_id: docMetadata.paperId || null,
         file_name: docMetadata.fileName,
         storage_path: docMetadata.storagePath || null,
@@ -204,11 +206,7 @@ export const questionService = {
       .select()
       .single()
 
-    if (error) {
-      console.warn('Document record insert note:', error)
-      return null
-    }
-
+    if (error) throw error
     return data
   },
 

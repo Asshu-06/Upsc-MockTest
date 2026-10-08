@@ -1,6 +1,6 @@
 # UPSC Previous-Year Question Paper Practice Platform
 
-A full-stack, production-ready UPSC Previous-Year Question Paper Practice Platform built using **React.js**, **Vite**, **Tailwind CSS**, **React Router DOM**, **Supabase** (PostgreSQL, Auth, Storage, Edge Functions), and configured for **Vercel** deployment.
+A full-stack UPSC Previous-Year Question Paper Practice Platform built using **React.js**, **Vite**, **Tailwind CSS**, **React Router DOM**, **Supabase** (PostgreSQL, Auth, Storage, Edge Functions), and a unified Flask application server.
 
 ---
 
@@ -15,19 +15,19 @@ A full-stack, production-ready UPSC Previous-Year Question Paper Practice Platfo
 * **Question-Wise Review & Explanations**: Detailed solutions with filterable views for Correct, Incorrect, and Unanswered questions.
 
 ### Admin Dashboard
-* **Paper CRUD & Publishing**: Create draft papers, upload official PDF documents to Supabase Storage (`question-papers`), edit parameters, set duration/marking rules, and publish/unpublish/archive papers.
+* **Paper CRUD & Publishing**: Create draft papers from a question JSON file, edit parameters, set duration/marking rules, and publish/unpublish/archive papers.
 * **Question Management**: Manual question entry with live preview, update, reorder, and answer key configuration.
-* **JSON / CSV Batch Importer**: Browser-side parsing of bulk JSON/CSV question callsets with inline validation, duplicate detection, and live table preview prior to database commit.
+* **PDF-to-JSON and Paper Creation**: Use the `text_extractor` project's Groq-backed page OCR, download the generated JSON, then upload that JSON while creating a paper. JSON imports into existing papers are also supported.
 * **System Attempts Reporting**: Track platform-wide user exam submissions and score metrics.
 
 ---
 
 ## 🛠️ Technology Stack
 
-* **Frontend**: React.js 18, Vite, Tailwind CSS, React Router v6, Lucide React Icons, React Hook Form, Zod, Recharts, Papaparse.
+* **Frontend**: React.js 18, Vite, Tailwind CSS, React Router v6, Lucide React Icons, React Hook Form, Zod, Recharts.
 * **Backend & Security**: Supabase (PostgreSQL, Supabase Auth, Supabase Storage, Row Level Security, Supabase Edge Functions).
-* **Deployment**: Vercel (Frontend SPA), Supabase Cloud (Database / Auth / Edge Functions).
-* **Extraction Utility**: Python, PyMuPDF (fitz) for local PDF text extraction to structured JSON.
+* **Application server**: Python Flask serves the built React app and PDF conversion APIs from one server.
+* **PDF question extraction**: The admin converter calls `text_extractor/EXC.py`, which renders PDF pages and sends them to Groq for OCR. Page 1 is treated as the cover and extraction starts at page 2.
 
 ---
 
@@ -48,7 +48,18 @@ Copy `.env.example` to `.env`:
 ```env
 VITE_SUPABASE_URL=https://your-supabase-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+GEMINI_API_KEY=your-gemini-api-key
 ```
+
+Install the Python server and `text_extractor` dependencies, then start the integrated app. In PowerShell:
+
+```powershell
+pip install -r pdf-extractor/requirements.txt
+pip install -r "$env:USERPROFILE\text_extractor\requirements.txt"
+npm start
+```
+
+The app expects `text_extractor` at `%USERPROFILE%\text_extractor` by default. Set `TEXT_EXTRACTOR_DIR` if it is elsewhere. Put `GROQ_API_KEY` in `text_extractor\.env`; do not paste API keys into the app or chat. The PDF pages are sent to Groq for OCR. `npm start` builds the React frontend and starts Flask on port 5000. Admins can use **PDF to JSON** to download the question array and upload it from **Create New Paper**. The separate `/api/extract` endpoint remains available for the user BYOP flow.
 
 ---
 
@@ -107,40 +118,9 @@ The Edge Function handles server-side answer verification, trusted scoring calcu
 
 ---
 
-## 📄 Local PDF Extraction Utility (`pdf-extractor/`)
+## 🌐 Deployment
 
-Located in `pdf-extractor/`:
-
-1. Install dependencies:
-   ```bash
-   pip install -r pdf-extractor/requirements.txt
-   ```
-2. Extract text from text-based UPSC question paper PDF:
-   ```bash
-   python pdf-extractor/extract.py path/to/upsc_2023.pdf extracted.txt
-   ```
-3. Parse extracted text into platform import JSON:
-   ```bash
-   python pdf-extractor/parser.py extracted.txt questions_import.json
-   ```
-4. Upload `questions_import.json` in **Admin Dashboard -> Papers -> Import Questions**.
-
----
-
-## 🌐 Vercel Deployment Instructions
-
-1. Push code to GitHub repository.
-2. Log into **Vercel** and select **Add New Project**.
-3. Import your GitHub repository.
-4. Framework Preset: **Vite**.
-5. Build Command: `npm run build`
-6. Output Directory: `dist`
-7. Add Environment Variables:
-   * `VITE_SUPABASE_URL`
-   * `VITE_SUPABASE_ANON_KEY`
-8. Deploy!
-
-*`vercel.json` is included with SPA rewrite rules to support direct URL route refreshes.*
+Deploy the project to a Python-capable host that can run Node.js during the build. Install the Python dependencies, set `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `GEMINI_API_KEY`, then run `npm start`. The Flask process serves both the frontend build and `/api/extract`; a frontend-only static deployment does not include the PDF extractor.
 
 ---
 

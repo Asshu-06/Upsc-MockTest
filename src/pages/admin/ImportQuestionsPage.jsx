@@ -1,26 +1,21 @@
 import React, { useEffect, useState } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import Papa from 'papaparse'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
-import { TextPdfTab } from '../../components/admin/TextPdfTab'
-import { useApp } from '../../contexts/AppContext'
+import { parseQuestionJson } from '../../services/questionJsonImport'
 import {
   ArrowLeft, Upload, FileText, CheckCircle2, AlertCircle, Loader2,
-  Save, ChevronDown, ChevronRight, Eye, FileCheck,
+  Save,
 } from 'lucide-react'
 
 // ─── Main page ─────────────────────────────────────────────────────────────────
 export function ImportQuestionsPage() {
   const { paperId } = useParams()
   const navigate    = useNavigate()
-  const { toast }   = useApp()
 
   const [paper, setPaper]         = useState(null)
   const [loading, setLoading]     = useState(true)
-  const [activeTab, setActiveTab] = useState('text')  // 'text' | 'csv'
 
-  // CSV/JSON state
   const [parsedRows, setParsedRows]   = useState([])
   const [fileName, setFileName]       = useState('')
   const [fileError, setFileError]     = useState(null)
@@ -34,63 +29,22 @@ export function ImportQuestionsPage() {
       .finally(() => setLoading(false))
   }, [paperId])
 
-  // ── CSV/JSON handlers ──────────────────────────────────────────────────
-  const validateRow = (row, index) => {
-    const errors = []
-    const num    = parseInt(row.question_number, 10)
-    if (isNaN(num) || num <= 0) errors.push('Invalid question number')
-    if (!row.question_text?.trim() || row.question_text.trim().length < 3) errors.push('Missing question text')
-    if (!row.option_a) errors.push('Missing Option A')
-    if (!row.option_b) errors.push('Missing Option B')
-    if (!row.option_c) errors.push('Missing Option C')
-    if (!row.option_d) errors.push('Missing Option D')
-    const opt = row.correct_option ? String(row.correct_option).toUpperCase().trim() : ''
-    if (!['A','B','C','D'].includes(opt)) errors.push('Correct option must be A, B, C, or D')
-    return {
-      index,
-      question_number: isNaN(num) ? index + 1 : num,
-      question_text:   row.question_text || '',
-      option_a:        row.option_a || '',
-      option_b:        row.option_b || '',
-      option_c:        row.option_c || '',
-      option_d:        row.option_d || '',
-      correct_option:  ['A','B','C','D'].includes(opt) ? opt : 'A',
-      explanation:     row.explanation || '',
-      isValid:         errors.length === 0,
-      errors,
-    }
-  }
-
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0]
+  const handleFileUpload = async (event) => {
+    const file = event.target.files?.[0]
     if (!file) return
-    setFileName(file.name); setFileError(null); setImportResult(null)
-    const isJson = file.name.endsWith('.json')
-    const isCsv  = file.name.endsWith('.csv')
-    if (!isJson && !isCsv) { setFileError('Please upload a .JSON or .CSV file.'); return }
-    const reader = new FileReader()
-    if (isJson) {
-      reader.onload = (ev) => {
-        try {
-          const json = JSON.parse(ev.target.result)
-          if (!Array.isArray(json)) { setFileError('JSON must be an array.'); return }
-          setParsedRows(json.map((item, i) => validateRow(item, i)))
-        } catch (err) { setFileError(`Invalid JSON: ${err.message}`) }
-      }
-      reader.readAsText(file)
-    } else {
-      Papa.parse(file, {
-        header: true, skipEmptyLines: true,
-        complete: res => setParsedRows((res.data || []).map((item, i) => validateRow(item, i))),
-        error:    err => setFileError(`CSV error: ${err.message}`),
-      })
+    setFileName(file.name)
+    setFileError(null)
+    setParsedRows([])
+    setImportResult(null)
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      setFileError('Please upload a .json file.')
+      return
     }
-  }
-
-  const handleRowChange = (index, field, value) => {
-    const updated = [...parsedRows]
-    updated[index] = validateRow({ ...updated[index], [field]: value }, index)
-    setParsedRows(updated)
+    try {
+      setParsedRows(parseQuestionJson(await file.text()))
+    } catch (error) {
+      setFileError(error.message)
+    }
   }
 
   const handleSaveImport = async () => {
@@ -114,8 +68,6 @@ export function ImportQuestionsPage() {
   )
 
   const validCount   = parsedRows.filter(r => r.isValid).length
-  const invalidCount = parsedRows.length - validCount
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -131,63 +83,32 @@ export function ImportQuestionsPage() {
         </p>
       </div>
 
-      {/* Tab switcher */}
-      <div className="flex gap-2 border-b border-surface-border pb-1">
-        <button
-          onClick={() => setActiveTab('text')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-            activeTab === 'text'
-              ? 'bg-primary text-white shadow-subtle'
-              : 'bg-slate-100 text-body-secondary hover:bg-slate-200'
-          }`}
-        >
-          <FileCheck className="w-3.5 h-3.5" />
-          Text PDF (Local Parser)
-        </button>
-        <button
-          onClick={() => setActiveTab('csv')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors ${
-            activeTab === 'csv'
-              ? 'bg-primary text-white shadow-subtle'
-              : 'bg-slate-100 text-body-secondary hover:bg-slate-200'
-          }`}
-        >
-          <FileText className="w-3.5 h-3.5" />
-          CSV / JSON
-        </button>
-      </div>
-
-      {/* ── Text PDF tab ── */}
-      {activeTab === 'text' && (
-        <TextPdfTab
-          paperId={paperId}
-          paperTitle={paper?.title}
-          onImportSuccess={() => setTimeout(() => navigate(`/admin/papers/${paperId}/questions`), 2000)}
-        />
-      )}
-
-      {/* ── CSV/JSON tab ── */}
-      {activeTab === 'csv' && (
-        <div className="space-y-6">
+      <div className="space-y-6">
           <div className="bg-white rounded-xl border border-surface-border p-6 shadow-card space-y-4">
             <h3 className="text-sm font-bold text-body-text uppercase tracking-wider">
-              Select Question File (.JSON or .CSV)
+              Select Question JSON
             </h3>
-            <div className="p-6 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 text-center space-y-3">
+            <label
+              htmlFor="file-import-input"
+              className="block cursor-pointer p-6 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 hover:bg-slate-50 hover:border-slate-400 transition-colors text-center space-y-3"
+            >
               <Upload className="w-8 h-8 text-slate-400 mx-auto" />
               <div>
-                <input type="file" accept=".json,.csv" onChange={handleFileUpload}
+                <input type="file" accept=".json,application/json" onChange={handleFileUpload}
                   className="hidden" id="file-import-input" />
-                <label htmlFor="file-import-input"
-                  className="cursor-pointer px-4 py-2 bg-primary hover:bg-primary-hover text-white font-bold rounded-lg text-xs inline-block shadow-subtle">
-                  Browse JSON / CSV File
-                </label>
+                <span
+                  className="px-4 py-2 bg-primary hover:bg-primary-hover text-white font-bold rounded-lg text-xs inline-block shadow-subtle">
+                  Browse JSON File
+                </span>
               </div>
               {fileName && <p className="text-xs font-semibold text-primary">Selected: {fileName}</p>}
               <p className="text-[11px] text-body-secondary">
-                CSV headers: <code>question_number, question_text, option_a, option_b, option_c, option_d, correct_option, explanation</code>
+                Upload an array of question objects, such as <code>extracted_questions.json</code>.
               </p>
-            </div>
+              <p className="text-[11px] text-amber-700">
+                JSON questions with an options array can be imported without an answer key. Their correct answer stays blank and must be set before using them for scored exams.
+              </p>
+            </label>
             {fileError && (
               <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-status-error text-xs flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" /><span>{fileError}</span>
@@ -240,10 +161,12 @@ export function ImportQuestionsPage() {
                         <td className="py-2 px-3">{row.option_b.slice(0, 20)}</td>
                         <td className="py-2 px-3">{row.option_c.slice(0, 20)}</td>
                         <td className="py-2 px-3">{row.option_d.slice(0, 20)}</td>
-                        <td className="py-2 px-3 font-bold">{row.correct_option}</td>
+                        <td className="py-2 px-3 font-bold">{row.correct_option || 'Not provided'}</td>
                         <td className="py-2 px-3">
                           {row.isValid ? (
-                            <span className="text-status-success">✓ Valid</span>
+                            <span className={row.correct_option ? 'text-status-success' : 'text-amber-700'}>
+                              {row.correct_option ? '✓ Valid' : 'Ready - no answer key'}
+                            </span>
                           ) : (
                             <span className="text-status-error">✗ {row.errors[0]}</span>
                           )}
@@ -261,7 +184,6 @@ export function ImportQuestionsPage() {
             </div>
           )}
         </div>
-      )}
     </div>
   )
 }

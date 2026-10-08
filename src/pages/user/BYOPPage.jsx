@@ -9,8 +9,7 @@ import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
 import { supabase } from '../../lib/supabase'
 import { byopService } from '../../services/tnpscService'
-import { extractPdfText } from '../../services/pdfTextExtractor'
-import { parseMcqQuestions } from '../../services/mcqParser'
+import { extractQuestionsFromPdf } from '../../services/pdfExtractionPipeline'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
 import { formatDate } from '../../lib/utils'
@@ -62,7 +61,7 @@ function BatchProgress({ info }) {
 
       {totalPages > 1 && (
         <p className="text-[11px] text-blue-600 text-center">
-          Processing page {currentPage ?? 0} of {totalPages} using local PDF.js parser
+          Processing page {currentPage ?? 0} of {totalPages} with the server-side extractor
         </p>
       )}
     </div>
@@ -438,89 +437,62 @@ export function BYOPPage() {
         blobType: pdfBlob.type
       })
 
-      // Step 2: Extract text from PDF using PDF.js
+      // Step 2: Send the PDF through the shared server-side extractor
       setProgress({ 
         stage: 'extracting', 
         currentPage: 0, 
         totalPages: 0, 
         pagesProcessed: 0,
         questionsFound: 0,
-        statusText: 'Extracting text from PDF...'
+        statusText: 'Sending PDF to the server-side extractor...'
       })
       
       let extractionResult
       try {
-        console.log('[BYOP] Starting PDF.js extraction...')
-        extractionResult = await extractPdfText(pdfBlob, (current, total) => {
-          console.log(`[BYOP] Extraction progress: page ${current}/${total} (job: ${processingJobId})`)
-          setProgress({
-            stage: 'extracting',
-            currentPage: current,
-            totalPages: total,
-            pagesProcessed: current,
-            questionsFound: 0,
-            statusText: `Extracting text from page ${current} of ${total}...`
-          })
+        console.log('[BYOP] Sending PDF to shared question extractor...')
+        extractionResult = await extractQuestionsFromPdf(pdfBlob, {
+          jobId: processingJobId,
+          fileName: paper.file_name,
         })
         
-        console.log('[BYOP] PDF.js extraction complete:', {
+        console.log('[BYOP] Server-side extraction complete:', {
           processingJobId,
           fileName: paper.file_name,
           totalPages: extractionResult.totalPages,
-          hasSelectableText: extractionResult.hasSelectableText,
-          extractedTextLength: extractionResult.pages?.reduce((sum, p) => 
-            sum + p.items.reduce((s, i) => s + (i.text?.length || 0), 0), 0)
+          extractedTextLength: extractionResult.fullText.length,
+          savedTo: extractionResult.savedTo,
         })
       } catch (err) {
-        console.error('[BYOP] PDF.js extraction error:', {
+        console.error('[BYOP] Server-side extraction error:', {
           processingJobId,
           fileName: paper.file_name,
           error: err.message,
           stack: err.stack
         })
         const errorMsg = err.message || 'Unknown PDF extraction error'
-        throw new Error(`PDF text extraction failed: ${errorMsg}`)
+        throw new Error(`PDF question extraction failed: ${errorMsg}`)
       }
 
-      // Check if PDF has selectable text
-      if (!extractionResult.pages || extractionResult.pages.length === 0) {
-        throw new Error('PDF contains no pages or failed to extract page data.')
-      }
-
-      // Verify page count
       console.log('[BYOP] PDF IDENTITY CHECK:', {
         processingJobId,
         fileName: paper.file_name,
         expectedFileName: paper.file_name,
         extractedPages: extractionResult.totalPages,
-        hasSelectableText: extractionResult.hasSelectableText
       })
 
-      // Check if any page has text items with content
-      const hasSelectableText = extractionResult.pages.some(page => 
-        page.items && page.items.length > 0 && 
-        page.items.some(item => item.text && item.text.trim().length > 0)
-      )
-
-      if (!hasSelectableText) {
-        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
-      }
-
-      // Step 3: Parse MCQ questions from extracted text
-      console.log('[BYOP] Starting MCQ parsing...')
+      // Step 3: Use the same normalized questions that were written to JSON
       setProgress({ 
         stage: 'parsing', 
-        currentPage: extractionResult.pages.length,
-        totalPages: extractionResult.pages.length,
-        pagesProcessed: extractionResult.pages.length,
-        questionsFound: 0,
-        statusText: 'Parsing questions from text...'
+        currentPage: extractionResult.totalPages,
+        totalPages: extractionResult.totalPages,
+        pagesProcessed: extractionResult.totalPages,
+        questionsFound: extractionResult.totalQuestions,
+        statusText: 'Preparing extracted questions...'
       })
 
-      const parseResult = await parseMcqQuestions(extractionResult, processingJobId, paper.file_name)
-      const questions = parseResult.questions || []
+      const questions = extractionResult.questions || []
 
-      console.log('[BYOP] MCQ parsing complete:', {
+      console.log('[BYOP] Extracted question summary:', {
         processingJobId,
         fileName: paper.file_name,
         totalQuestions: questions.length,
@@ -533,7 +505,6 @@ export function BYOPPage() {
           processingJobId,
           fileName: paper.file_name,
           totalPages: extractionResult.totalPages,
-          hasSelectableText: extractionResult.hasSelectableText
         })
         await byopService.update(paper.id, user.id, {
           processing_status: 'failed',
@@ -556,8 +527,8 @@ export function BYOPPage() {
         fileName: paper.file_name,
         questions,
         totalQuestions: questions.length,
-        totalPages: extractionResult.pages.length,
-        processedPages: extractionResult.pages.length,
+        totalPages: extractionResult.totalPages,
+        processedPages: extractionResult.totalPages,
       })
 
       // Determine status based on validation
@@ -702,14 +673,14 @@ export function BYOPPage() {
       // Prepare full payload
       const storagePayload = {
         processing_status: newStatus,
-        total_pages: extractionResult.pages.length,
-        processed_pages: extractionResult.pages.length,
+        total_pages: extractionResult.totalPages,
+        processed_pages: extractionResult.totalPages,
         extracted_count: questions.length,
         questions_json: sanitizedQuestions,
         batch_progress_json: [],
         notes: needsReview
           ? `${questions.length} questions extracted. ${validCount} ready, ${questions.length - validCount} need review.`
-          : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
+          : `${questions.length} questions extracted from ${extractionResult.totalPages} pages.`,
       }
       
       console.log('[BYOP] STORAGE PAYLOAD DEBUG:', {
@@ -739,8 +710,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 2: Status + counts')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.pages.length,
-          processed_pages: extractionResult.pages.length,
+          total_pages: extractionResult.totalPages,
+          processed_pages: extractionResult.totalPages,
           extracted_count: questions.length
         })
         console.log('[BYOP] ✓ TEST 2 PASS: Status + counts')
@@ -749,8 +720,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 3: + batch_progress_json')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.pages.length,
-          processed_pages: extractionResult.pages.length,
+          total_pages: extractionResult.totalPages,
+          processed_pages: extractionResult.totalPages,
           extracted_count: questions.length,
           batch_progress_json: []
         })
@@ -760,8 +731,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 4: + notes')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.pages.length,
-          processed_pages: extractionResult.pages.length,
+          total_pages: extractionResult.totalPages,
+          processed_pages: extractionResult.totalPages,
           extracted_count: questions.length,
           batch_progress_json: [],
           notes: storagePayload.notes
@@ -912,7 +883,7 @@ export function BYOPPage() {
           <div>
             <h1 className="text-xl font-bold text-body-text">Bring Your Own Paper</h1>
             <p className="text-xs text-body-secondary">
-              Upload selectable-text PDF — local parser extracts questions automatically
+              Upload a question paper PDF — the server extracts questions and options automatically
             </p>
           </div>
         </div>
@@ -931,10 +902,9 @@ export function BYOPPage() {
       <div className="bg-tnpsc-brand-light border border-tnpsc-brand/20 rounded-2xl p-4 flex items-start gap-3">
         <Layers className="w-5 h-5 text-tnpsc-brand shrink-0 mt-0.5" />
         <div>
-          <p className="text-sm font-bold text-tnpsc-brand">Local PDF.js Extraction Pipeline</p>
+          <p className="text-sm font-bold text-tnpsc-brand">Server-side PDF Question Extractor</p>
           <p className="text-xs text-body-secondary mt-0.5">
-            Uses PDF.js to extract selectable text from PDFs and deterministic parser to identify MCQ questions with tick-mark detection.
-            Supports selectable-text PDFs only. Scanned/image-only PDFs are not supported.
+            Extracts question text and answer options from selectable-text or scanned PDFs, then saves the questions for review.
           </p>
         </div>
       </div>
@@ -962,7 +932,7 @@ export function BYOPPage() {
       >
         <Upload className="w-10 h-10 text-slate-300 group-hover:text-tnpsc-brand mx-auto mb-3 transition-colors" />
         <p className="text-sm font-semibold text-body-secondary group-hover:text-tnpsc-brand transition-colors">
-          Click to upload selectable-text PDF
+          Click to upload a question paper PDF
         </p>
         <p className="text-xs text-body-secondary mt-1">Max 35 MB · Scanned/image-only PDFs not supported</p>
       </div>

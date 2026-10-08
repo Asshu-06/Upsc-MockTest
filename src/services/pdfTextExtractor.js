@@ -15,6 +15,7 @@
  */
 
 import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.js?url'
 
 const pdfjs = pdfjsLib.getDocument ? pdfjsLib : (pdfjsLib.default || pdfjsLib)
 
@@ -23,14 +24,14 @@ let workerConfigured = false
 function ensureWorker() {
   if (workerConfigured) return
   try {
-    if (typeof window !== 'undefined') {
-      if (pdfjs?.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
-        pdfjs.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.js'
-      }
+    if (typeof window !== 'undefined' && pdfjs?.GlobalWorkerOptions) {
+      // Prefer the Vite-bundled worker; fall back to the public copy.
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc || '/pdfjs/pdf.worker.min.js'
     }
     workerConfigured = true
   } catch (e) {
     console.warn('[pdfTextExtractor] PDF.js worker setup warning:', e)
+    workerConfigured = true
   }
 }
 
@@ -191,13 +192,30 @@ export async function extractPdfText(fileInput, onProgress = null) {
     )
   }
 
+  const fullText = pagesToPlainText(pages)
+
   return {
     fileName,
     totalPages,
     pages,
     hasSelectableText,
+    fullText,
     warnings,
   }
+}
+
+/**
+ * Rebuild readable page text (reading order) from positioned PDF.js items.
+ */
+export function pagesToPlainText(pages = []) {
+  return pages.map((page) => {
+    const lines = groupItemsByLine(page.items || [], 4)
+    const text = lines
+      .map(reconstructLineText)
+      .filter((line) => line && line.trim().length > 0)
+      .join('\n')
+    return `--- PAGE ${page.pageNumber} ---\n${text}`
+  }).join('\n\n')
 }
 
 // ─── Helper: Merge text items that are on the same line ──────────────────────

@@ -19,8 +19,4 @@ This local python tool extracts text from text-based UPSC question paper PDFs an
    python parser.py extracted.txt questions.json
    ```
 
-4. Step 3 - Admin Import:
-   - Log in as Admin on the UPSC Platform.
-   - Go to **Admin Dashboard -> Papers -> Import Questions**.
-   - Drag & Drop `questions.json`.
-   - Review and verify correct answer keys in the interactive table before importing.
+This utility is separate from the admin PDF-to-JSON workflow. The admin converter uses the Groq-backed OCR implementation in the sibling `text_extractor` project, which can process scanned pages.

@@ -4,12 +4,9 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { paperSchema } from '../../lib/validations'
 import { paperService } from '../../services/paperService'
-import { storageService } from '../../services/storageService'
 import { questionService } from '../../services/questionService'
-import { extractPdfText } from '../../services/pdfTextExtractor'
-import { parseMcqQuestions } from '../../services/mcqParser'
-import { PdfQuestionImporter } from '../../components/admin/PdfQuestionImporter'
-import { ArrowLeft, Save, Upload, FileCheck, AlertCircle, Loader2, CheckCircle2, HelpCircle, RefreshCw, FileText, Sparkles } from 'lucide-react'
+import { parseQuestionJson } from '../../services/questionJsonImport'
+import { ArrowLeft, Upload, AlertCircle, Loader2, CheckCircle2, FileText } from 'lucide-react'
 
 export function CreateEditPaperPage() {
   const { paperId } = useParams()
@@ -17,15 +14,12 @@ export function CreateEditPaperPage() {
   const navigate = useNavigate()
 
   const [createdPaperId, setCreatedPaperId] = useState(paperId || null)
-  const [dbQuestionCount, setDbQuestionCount] = useState(0)
 
   const [loading, setLoading] = useState(isEditMode)
   const [submitting, setSubmitting] = useState(false)
-  const [extracting, setExtracting] = useState(false)
-
-  const [pdfFile, setPdfFile] = useState(null)
-  const [pdfUploadPath, setPdfUploadPath] = useState(null)
-  const [extractionResult, setExtractionResult] = useState(null)
+  const [jsonFileName, setJsonFileName] = useState('')
+  const [parsedQuestions, setParsedQuestions] = useState([])
+  const [jsonError, setJsonError] = useState(null)
 
   const [serverError, setServerError] = useState(null)
   const [successMsg, setSuccessMsg] = useState(null)
@@ -53,15 +47,6 @@ export function CreateEditPaperPage() {
     }
   })
 
-  const loadQuestionCount = async (pid) => {
-    try {
-      const count = await questionService.getExistingQuestionCount(pid)
-      setDbQuestionCount(count)
-    } catch (err) {
-      console.error('Error fetching question count:', err)
-    }
-  }
-
   useEffect(() => {
     if (isEditMode) {
       async function fetchPaper() {
@@ -80,9 +65,7 @@ export function CreateEditPaperPage() {
             setValue('marks_per_question', paper.marks_per_question)
             setValue('negative_marking', paper.negative_marking)
             setValue('status', paper.status)
-            if (paper.pdf_path) setPdfUploadPath(paper.pdf_path)
             setCreatedPaperId(paper.id)
-            await loadQuestionCount(paper.id)
           }
         } catch (err) {
           console.error('Fetch paper error:', err)
@@ -96,198 +79,72 @@ export function CreateEditPaperPage() {
     }
   }, [paperId, isEditMode, setValue])
 
-  // Single PDF selection handler
-  const handlePdfFileChange = (e) => {
-    const file = e.target.files[0]
+  const handleJsonFileChange = async (event) => {
+    const file = event.target.files?.[0]
+    setJsonFileName(file?.name || '')
+    setParsedQuestions([])
+    setJsonError(null)
+    setServerError(null)
     if (!file) return
 
-    setServerError(null)
-    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      setServerError('Selected file must be a valid PDF document.')
+    if (!file.name.toLowerCase().endsWith('.json')) {
+      setJsonError('Select a .json question file.')
       return
     }
 
-    if (file.size > 30 * 1024 * 1024) {
-      setServerError('PDF file size must not exceed 30MB.')
-      return
+    try {
+      const questions = parseQuestionJson(await file.text())
+      setParsedQuestions(questions)
+      const invalidCount = questions.filter((question) => !question.isValid).length
+      if (invalidCount > 0) {
+        setJsonError(
+          `${invalidCount} question${invalidCount === 1 ? '' : 's'} need fixing. ` +
+          'Every question must have text and four options before the paper can be created.'
+        )
+      }
+    } catch (error) {
+      setJsonError(error.message)
     }
-
-    setPdfFile(file)
   }
 
-  // Primary Action: Save Paper & Extract Questions
   const onSubmit = async (formData) => {
     setServerError(null)
     setSuccessMsg(null)
+    setJsonError(null)
+    if (!isEditMode && !createdPaperId && parsedQuestions.length === 0) {
+      setJsonError('Upload a valid JSON question file before creating the paper.')
+      return
+    }
+    const validQuestions = parsedQuestions.filter((question) => question.isValid)
+    if (parsedQuestions.length > 0 && validQuestions.length !== parsedQuestions.length) {
+      setJsonError('Fix invalid questions in the JSON file before saving the paper.')
+      return
+    }
     setSubmitting(true)
 
     let activeId = createdPaperId
 
     try {
-      // 1. Create or Update Paper Record
       if (isEditMode || activeId) {
-        await paperService.updatePaper(activeId, {
-          ...formData,
-          pdf_path: pdfUploadPath
-        })
+        await paperService.updatePaper(activeId, formData)
       } else {
-        const newPaper = await paperService.createPaper({
-          ...formData,
-          pdf_path: pdfUploadPath
-        })
+        const newPaper = await paperService.createPaper(formData)
         activeId = newPaper.id
         setCreatedPaperId(activeId)
       }
 
-      // 2. Upload PDF to Storage if new file selected
-      let currentPath = pdfUploadPath
-      if (pdfFile && activeId) {
-        currentPath = await storageService.uploadPaperPdf(pdfFile, activeId)
-        setPdfUploadPath(currentPath)
-        await paperService.updatePaper(activeId, { pdf_path: currentPath })
-      }
-
-      setSuccessMsg('Paper details saved successfully!')
-
-      // 3. Trigger Automatic PDF Question Extraction if PDF file/path is available
-      if (pdfFile || currentPath) {
-        setExtracting(true)
-        let pdfInput = pdfFile
-
-        if (!pdfInput && currentPath) {
-          pdfInput = await storageService.getPdfPublicUrl(currentPath)
-        }
-
-        if (pdfInput) {
-          // Generate unique processing job ID
-          const processingJobId = `admin-${Date.now()}`
-          const fileName = pdfFile?.name || currentPath?.split('/').pop() || 'unknown.pdf'
-          
-          console.log('[AdminPDF] ═══ PROCESS START ═══')
-          console.log('[AdminPDF] processingJobId:', processingJobId)
-          console.log('[AdminPDF] paperId:', paperId || 'new')
-          console.log('[AdminPDF] fileName:', fileName)
-          console.log('[AdminPDF] timestamp:', new Date().toISOString())
-
-          // Extract text with coordinates
-          console.log('[AdminPDF] Starting PDF.js extraction...')
-          const extractionResult = await extractPdfText(pdfInput)
-          
-          // Log extraction metrics
-          const totalTextItems = extractionResult.pages?.reduce((sum, p) => sum + (p.items?.length || 0), 0) || 0
-          const extractedTextLength = extractionResult.pages?.reduce((sum, page) => 
-            sum + page.items.reduce((s, item) => s + (item.text?.length || 0), 0), 0) || 0
-          
-          console.log('[AdminPDF] PDF.js extraction complete:', {
-            processingJobId,
-            fileName,
-            numPages: extractionResult.totalPages,
-            totalTextItems,
-            extractedTextLength,
-            hasSelectableText: extractionResult.hasSelectableText
-          })
-          
-          // Log first 3 pages detail
-          extractionResult.pages?.slice(0, 3).forEach(page => {
-            const pageTextLength = page.items.reduce((s, i) => s + (i.text?.length || 0), 0)
-            console.log(`[AdminPDF] page=${page.pageNumber}/${extractionResult.totalPages} items=${page.items.length} textLength=${pageTextLength}`)
-          })
-          
-          // Parse MCQs
-          console.log('[AdminPDF] Starting MCQ parsing...')
-          const result = await parseMcqQuestions(extractionResult, processingJobId, fileName)
-          
-          console.log('[AdminPDF] MCQ parsing complete:', {
-            processingJobId,
-            fileName,
-            totalQuestions: result.totalQuestions,
-            validQuestions: result.validQuestions,
-            needsReview: result.needsReview
-          })
-          
-          console.log('[AdminPDF] ═══ PROCESS END ═══', { processingJobId })
-          
-          setExtractionResult(result)
-
-          // Scroll to extraction results section
-          setTimeout(() => {
-            const section = document.getElementById('extraction-results-section')
-            if (section) {
-              section.scrollIntoView({ behavior: 'smooth' })
-            }
-          }, 300)
-        }
+      if (validQuestions.length > 0) {
+        await questionService.batchImportQuestions(activeId, validQuestions)
+        setSuccessMsg(`Paper saved and ${validQuestions.length} questions imported successfully.`)
+        setTimeout(() => navigate(`/admin/papers/${activeId}/questions`), 1200)
+      } else {
+        setSuccessMsg('Paper details saved successfully.')
       }
     } catch (err) {
-      console.error('Save paper and extract error:', err)
-      setServerError(err.message || 'Failed to save paper and extract questions.')
+      console.error('Save paper and import questions error:', err)
+      setServerError(err.message || 'Failed to save the paper or import its questions.')
     } finally {
       setSubmitting(false)
-      setExtracting(false)
-    }
-  }
-
-  // Retry Extraction handler using existing file/path
-  const handleRetryExtraction = async () => {
-    if (!pdfFile && !pdfUploadPath) {
-      setServerError('Please select a PDF file first.')
-      return
-    }
-
-    setExtracting(true)
-    setServerError(null)
-
-    try {
-      // Generate unique processing job ID
-      const processingJobId = `admin-retry-${Date.now()}`
-      const fileName = pdfFile?.name || pdfUploadPath?.split('/').pop() || 'unknown.pdf'
-      
-      console.log('[AdminPDF] ═══ RETRY PROCESS START ═══')
-      console.log('[AdminPDF] processingJobId:', processingJobId)
-      console.log('[AdminPDF] fileName:', fileName)
-
-      let pdfInput = pdfFile
-      if (!pdfInput && pdfUploadPath) {
-        pdfInput = await storageService.getPdfPublicUrl(pdfUploadPath)
-      }
-
-      // Extract text with coordinates
-      console.log('[AdminPDF] Starting PDF.js extraction...')
-      const extractionResult = await extractPdfText(pdfInput)
-      
-      // Log extraction metrics
-      const totalTextItems = extractionResult.pages?.reduce((sum, p) => sum + (p.items?.length || 0), 0) || 0
-      const extractedTextLength = extractionResult.pages?.reduce((sum, page) => 
-        sum + page.items.reduce((s, item) => s + (item.text?.length || 0), 0), 0) || 0
-      
-      console.log('[AdminPDF] PDF.js extraction complete:', {
-        processingJobId,
-        fileName,
-        numPages: extractionResult.totalPages,
-        totalTextItems,
-        extractedTextLength,
-        hasSelectableText: extractionResult.hasSelectableText
-      })
-      
-      // Parse MCQs
-      console.log('[AdminPDF] Starting MCQ parsing...')
-      const result = await parseMcqQuestions(extractionResult, processingJobId, fileName)
-      
-      console.log('[AdminPDF] MCQ parsing complete:', {
-        processingJobId,
-        fileName,
-        totalQuestions: result.totalQuestions,
-        validQuestions: result.validQuestions,
-        needsReview: result.needsReview
-      })
-      
-      console.log('[AdminPDF] ═══ RETRY PROCESS END ═══', { processingJobId })
-      setExtractionResult(result)
-    } catch (err) {
-      console.error('Retry extraction error:', err)
-      setServerError(err.message || 'Failed to extract questions from PDF.')
-    } finally {
-      setExtracting(false)
     }
   }
 
@@ -315,7 +172,7 @@ export function CreateEditPaperPage() {
             {isEditMode ? 'Edit Paper Details' : 'Create New Question Paper'}
           </h1>
           <p className="text-xs text-body-secondary mt-1">
-            Fill paper metadata, upload official question paper PDF, and extract questions automatically.
+            Upload a question JSON file, then configure and create the paper.
           </p>
         </div>
 
@@ -334,10 +191,43 @@ export function CreateEditPaperPage() {
         )}
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-          {/* STEP 1: Paper Details */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-primary border-b border-surface-border pb-2">
+              Step 1: Upload Questions JSON
+            </h3>
+            <label
+              htmlFor="questions-json"
+              className="block cursor-pointer rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 p-6 text-center hover:border-primary"
+            >
+              <Upload className="mx-auto mb-3 h-8 w-8 text-slate-400" />
+              <span className="text-sm font-semibold text-body-text">
+                {jsonFileName || 'Choose extracted_questions.json'}
+              </span>
+              <p className="mt-1 text-xs text-body-secondary">
+                JSON array with question_text and four options; correct answers are optional.
+              </p>
+              <input
+                id="questions-json"
+                type="file"
+                accept=".json,application/json"
+                onChange={handleJsonFileChange}
+                className="sr-only"
+              />
+            </label>
+            {jsonError && (
+              <p role="alert" className="text-xs text-status-error">{jsonError}</p>
+            )}
+            {parsedQuestions.length > 0 && (
+              <p className="text-xs font-semibold text-emerald-700">
+                {parsedQuestions.filter((question) => question.isValid).length} valid of {parsedQuestions.length} questions ready to import.
+              </p>
+            )}
+          </div>
+
+          {/* STEP 2: Paper Details */}
           <div className="space-y-4">
             <h3 className="text-xs font-bold uppercase tracking-wider text-primary border-b border-surface-border pb-2">
-              Step 1: Paper Metadata & Scoring Parameters
+              Step 2: Paper Metadata & Scoring Parameters
             </h3>
 
             {/* Title */}
@@ -488,38 +378,6 @@ export function CreateEditPaperPage() {
             </div>
           </div>
 
-          {/* STEP 2: SINGLE PDF UPLOAD AREA */}
-          <div className="space-y-3 pt-4 border-t border-surface-border">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-primary">
-              Step 2: Upload Official Question Paper PDF
-            </h3>
-
-            <div className="p-5 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 space-y-3">
-              <label className="block text-xs font-bold text-body-text">
-                Upload Official Question Paper PDF
-              </label>
-              <p className="text-xs text-body-secondary">
-                Upload the PDF containing questions, options, and answer key. Questions will be extracted automatically.
-              </p>
-
-              <div className="flex flex-col sm:flex-row items-center gap-4 pt-1">
-                <input
-                  type="file"
-                  accept="application/pdf"
-                  onChange={handlePdfFileChange}
-                  className="text-xs text-body-secondary file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-white hover:file:bg-primary-hover cursor-pointer w-full"
-                />
-
-                {(pdfFile || pdfUploadPath) && (
-                  <div className="text-xs font-semibold text-emerald-800 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-200 flex items-center space-x-1.5 whitespace-nowrap">
-                    <FileCheck className="w-4 h-4 text-emerald-700" />
-                    <span>{pdfFile ? pdfFile.name : 'PDF Attached'}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
           {/* STEP 3: PRIMARY ACTION BUTTON */}
           <div className="pt-4 border-t border-surface-border flex items-center justify-between">
             <Link
@@ -531,18 +389,18 @@ export function CreateEditPaperPage() {
 
             <button
               type="submit"
-              disabled={submitting || extracting}
+              disabled={submitting}
               className="px-8 py-3 bg-primary hover:bg-primary-hover text-white rounded-xl font-bold text-sm shadow-card flex items-center space-x-2 disabled:opacity-50 transition-all"
             >
-              {submitting || extracting ? (
+              {submitting ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>{extracting ? 'Extracting questions from PDF...' : 'Saving paper details...'}</span>
+                  <span>Saving paper and importing questions...</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-4 h-4 fill-white" />
-                  <span>{isEditMode ? 'Update Paper & Extract Questions' : 'Save Paper & Extract Questions'}</span>
+                  <FileText className="w-4 h-4" />
+                  <span>{isEditMode ? 'Update Paper & Import JSON' : 'Create Paper & Import JSON'}</span>
                 </>
               )}
             </button>
@@ -550,17 +408,6 @@ export function CreateEditPaperPage() {
         </form>
       </div>
 
-      {/* STEPS 4, 5, 6, 7: QUESTION EXTRACTION RESULTS, PREVIEW & IMPORT */}
-      {(createdPaperId || extractionResult || serverError) && (
-        <PdfQuestionImporter
-          paperId={createdPaperId}
-          extractionResult={extractionResult}
-          extracting={extracting}
-          extractionError={serverError}
-          onRetryExtraction={handleRetryExtraction}
-          onImportSuccess={() => loadQuestionCount(createdPaperId)}
-        />
-      )}
     </div>
   )
 }

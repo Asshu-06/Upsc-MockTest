@@ -42,15 +42,16 @@ def parse_questions_from_text(txt_content):
         option_dict = {'A': '', 'B': '', 'C': '', 'D': ''}
         q_text = q_body
 
-        if len(options) >= 4:
+        if options:
             # Extract question text before the first option
             first_opt_pos = re.search(r'\([a-dA-D]\)', q_body)
             if first_opt_pos:
                 q_text = q_body[:first_opt_pos.start()].strip()
 
-            for key, val in options[:4]:
+            for key, val in options:
                 k_upper = key.upper()
-                option_dict[k_upper] = val.strip().replace('\n', ' ')
+                if not option_dict[k_upper]:
+                    option_dict[k_upper] = val.strip().replace('\n', ' ')
 
         questions.append({
             "question_number": q_num,
@@ -59,7 +60,11 @@ def parse_questions_from_text(txt_content):
             "option_b": option_dict['B'],
             "option_c": option_dict['C'],
             "option_d": option_dict['D'],
-            "correct_option": "A", # Default fallback for review in Admin preview
+            "options": [
+                f"({letter}) {option_dict[letter]}"
+                for letter in ('A', 'B', 'C', 'D')
+            ],
+            "correct_option": None,
             "explanation": ""
         })
 
