@@ -63,7 +63,11 @@ def _save_questions_atomically(questions, output_json_path):
             os.remove(temporary_output_path)
 
 
-def extract_all_questions(pdf_path: str, output_json_path: str = "extracted_questions.json"):
+def extract_all_questions(
+    pdf_path: str,
+    output_json_path: str = "extracted_questions.json",
+    start_page: int = 1,
+):
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file '{pdf_path}' was not found.")
 
@@ -85,7 +89,11 @@ def extract_all_questions(pdf_path: str, output_json_path: str = "extracted_ques
     )
     all_extracted_data = []
     
-    for page_num in range(1, total_pages + 1):
+    if start_page < 1 or start_page > total_pages + 1:
+        doc.close()
+        raise ValueError(f"start_page must be between 1 and {total_pages + 1}.")
+
+    for page_num in range(start_page, total_pages + 1):
         print(f"Processing Page {page_num} of {total_pages}...", flush=True)
         
         page = doc[page_num - 1]

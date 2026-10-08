@@ -6,9 +6,13 @@ node_modules/
 
 # Testing
 coverage/
+.pytest_cache/
+__pycache__/
+*.py[cod]
 
 # Production
 dist/
+.vercel/
 
 # Environment variables
 .env

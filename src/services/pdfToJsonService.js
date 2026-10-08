@@ -1,15 +1,7 @@
-export async function extractQuestionsJsonFromPdf(file) {
-  const formData = new FormData()
-  formData.append('file', file, file.name)
+import { postPdfForExtraction } from './vercelPdfApi'
 
-  const response = await fetch('/api/extract-json', {
-    method: 'POST',
-    body: formData,
-  })
-  const result = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    throw new Error(result.error || `PDF-to-JSON conversion failed (HTTP ${response.status}).`)
-  }
+export async function extractQuestionsJsonFromPdf(file) {
+  const result = await postPdfForExtraction(file, '/api/extract-json', file.name)
   if (!Array.isArray(result.questions)) {
     throw new Error('The text extractor returned an invalid question list.')
   }

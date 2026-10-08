@@ -1,5 +1,7 @@
+import { postPdfForExtraction } from './vercelPdfApi'
+
 /**
- * Send a PDF to the backend OCR service and normalize its JSON questions for
+ * Send a PDF to the serverless OCR service and normalize its JSON questions for
  * the existing admin import and practice flows.
  */
 export async function extractQuestionsFromPdf(fileInput, options = {}) {
@@ -8,24 +10,16 @@ export async function extractQuestionsFromPdf(fileInput, options = {}) {
     fileName,
   } = options
 
-  const { file, resolvedName } = await resolvePdfFile(fileInput, fileName)
-  const formData = new FormData()
-  formData.append('file', file, resolvedName)
-
-  const response = await fetch('/api/extract', {
-    method: 'POST',
-    body: formData,
-  })
-  const result = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    throw new Error(result.error || `PDF extraction failed (HTTP ${response.status}).`)
+  const result = await postPdfForExtraction(fileInput, '/api/extract', fileName)
+  if (!Array.isArray(result.questions)) {
+    throw new Error('The PDF extractor returned an invalid question list.')
   }
 
   const questions = normalizeExtractedQuestions(result.questions)
 
   return {
     processingJobId: jobId,
-    fileName: result.fileName || resolvedName,
+    fileName: result.fileName || fileName || 'document.pdf',
     totalPages: result.totalPages || 0,
     totalQuestions: questions.length,
     validQuestions: questions.filter((question) => question.status === 'valid').length,
@@ -35,36 +29,7 @@ export async function extractQuestionsFromPdf(fileInput, options = {}) {
     hasSelectableText: Boolean(result.fullText),
     pages: [],
     warnings: [],
-    savedTo: result.savedTo,
   }
-}
-
-async function resolvePdfFile(fileInput, requestedFileName) {
-  if (fileInput instanceof Blob) {
-    const resolvedName = requestedFileName || fileInput.name || 'document.pdf'
-    return { file: fileInput, resolvedName }
-  }
-
-  if (fileInput instanceof ArrayBuffer) {
-    return {
-      file: new Blob([fileInput], { type: 'application/pdf' }),
-      resolvedName: requestedFileName || 'document.pdf',
-    }
-  }
-
-  if (typeof fileInput === 'string') {
-    const response = await fetch(fileInput)
-    if (!response.ok) {
-      throw new Error(`Could not load PDF (HTTP ${response.status}).`)
-    }
-    const urlName = fileInput.split('/').pop()?.split('?')[0]
-    return {
-      file: await response.blob(),
-      resolvedName: requestedFileName || decodeURIComponent(urlName || 'document.pdf'),
-    }
-  }
-
-  throw new Error('Unsupported PDF input.')
 }
 
 function normalizeExtractedQuestions(rawQuestions = []) {

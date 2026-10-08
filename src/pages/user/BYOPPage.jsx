@@ -422,22 +422,7 @@ export function BYOPPage() {
     try {
       const signedUrl  = await byopService.getSignedUrl(paper.storage_path)
 
-      // Step 1: Fetch PDF blob
-      console.log('[BYOP] Fetching PDF from storage...')
-      const response = await fetch(signedUrl)
-      if (!response.ok) {
-        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`)
-      }
-      const pdfBlob = await response.blob()
-      
-      console.log('[BYOP] PDF Blob fetched:', {
-        processingJobId,
-        fileName: paper.file_name,
-        blobSize: pdfBlob.size,
-        blobType: pdfBlob.type
-      })
-
-      // Step 2: Send the PDF through the shared server-side extractor
+      // Pass the signed storage URL so the serverless function downloads the PDF directly.
       setProgress({ 
         stage: 'extracting', 
         currentPage: 0, 
@@ -449,8 +434,8 @@ export function BYOPPage() {
       
       let extractionResult
       try {
-        console.log('[BYOP] Sending PDF to shared question extractor...')
-        extractionResult = await extractQuestionsFromPdf(pdfBlob, {
+        console.log('[BYOP] Sending the signed PDF URL to the serverless extractor...')
+        extractionResult = await extractQuestionsFromPdf(signedUrl, {
           jobId: processingJobId,
           fileName: paper.file_name,
         })
@@ -460,7 +445,6 @@ export function BYOPPage() {
           fileName: paper.file_name,
           totalPages: extractionResult.totalPages,
           extractedTextLength: extractionResult.fullText.length,
-          savedTo: extractionResult.savedTo,
         })
       } catch (err) {
         console.error('[BYOP] Server-side extraction error:', {

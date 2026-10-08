@@ -24,9 +24,9 @@ export function AdminPdfToJsonPage() {
     if (selectedFile && !selectedFile.name.toLowerCase().endsWith('.pdf')) {
       setFile(null)
       setError('Select a PDF file.')
-    } else if (selectedFile && selectedFile.size > 50 * 1024 * 1024) {
+    } else if (selectedFile && selectedFile.size > 35 * 1024 * 1024) {
       setFile(null)
-      setError('PDF file size must not exceed 50 MB.')
+      setError('PDF file size must not exceed 35 MB.')
     }
   }
 

@@ -1,6 +1,6 @@
 # UPSC Previous-Year Question Paper Practice Platform
 
-A full-stack UPSC Previous-Year Question Paper Practice Platform built using **React.js**, **Vite**, **Tailwind CSS**, **React Router DOM**, **Supabase** (PostgreSQL, Auth, Storage, Edge Functions), and a unified Flask application server.
+A full-stack UPSC Previous-Year Question Paper Practice Platform built using **React.js**, **Vite**, **Tailwind CSS**, **React Router DOM**, **Supabase** (PostgreSQL, Auth, Storage, Edge Functions), and **Vercel Python Functions**.
 
 ---
 
@@ -17,7 +17,7 @@ A full-stack UPSC Previous-Year Question Paper Practice Platform built using **R
 ### Admin Dashboard
 * **Paper CRUD & Publishing**: Create draft papers from a question JSON file, edit parameters, set duration/marking rules, and publish/unpublish/archive papers.
 * **Question Management**: Manual question entry with live preview, update, reorder, and answer key configuration.
-* **PDF-to-JSON and Paper Creation**: Use the `text_extractor` project's Groq-backed page OCR, download the generated JSON, then upload that JSON while creating a paper. JSON imports into existing papers are also supported.
+* **PDF-to-JSON and Paper Creation**: Use the repository's Gemini-backed page OCR, download the generated JSON, then upload that JSON while creating a paper. JSON imports into existing papers are also supported.
 * **System Attempts Reporting**: Track platform-wide user exam submissions and score metrics.
 
 ---
@@ -26,8 +26,8 @@ A full-stack UPSC Previous-Year Question Paper Practice Platform built using **R
 
 * **Frontend**: React.js 18, Vite, Tailwind CSS, React Router v6, Lucide React Icons, React Hook Form, Zod, Recharts.
 * **Backend & Security**: Supabase (PostgreSQL, Supabase Auth, Supabase Storage, Row Level Security, Supabase Edge Functions).
-* **Application server**: Python Flask serves the built React app and PDF conversion APIs from one server.
-* **PDF question extraction**: The admin converter calls `text_extractor/EXC.py`, which renders PDF pages and sends them to Groq for OCR. Page 1 is treated as the cover and extraction starts at page 2.
+* **Application hosting**: Vercel serves the built React app and runs the Python PDF APIs as serverless functions.
+* **PDF question extraction**: Both PDF workflows use the repository's Gemini-backed OCR extractor. PDFs are uploaded to the authenticated Supabase `user-papers` bucket and passed to the API as signed URLs, avoiding Vercel's request-body upload limit.
 
 ---
 
@@ -51,15 +51,13 @@ VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
 GEMINI_API_KEY=your-gemini-api-key
 ```
 
-Install the Python server and `text_extractor` dependencies, then start the integrated app. In PowerShell:
+For local frontend development, run:
 
 ```powershell
-pip install -r pdf-extractor/requirements.txt
-pip install -r "$env:USERPROFILE\text_extractor\requirements.txt"
-npm start
+npm run dev
 ```
 
-The app expects `text_extractor` at `%USERPROFILE%\text_extractor` by default. Set `TEXT_EXTRACTOR_DIR` if it is elsewhere. Put `GROQ_API_KEY` in `text_extractor\.env`; do not paste API keys into the app or chat. The PDF pages are sent to Groq for OCR. `npm start` builds the React frontend and starts Flask on port 5000. Admins can use **PDF to JSON** to download the question array and upload it from **Create New Paper**. The separate `/api/extract` endpoint remains available for the user BYOP flow.
+To run the Vercel Python functions locally too, use the Vercel CLI from the repository root with `npx vercel dev`. PDF OCR uses `GEMINI_API_KEY`; never expose it through a `VITE_` variable or put it in browser code.
 
 ---
 
@@ -68,11 +66,10 @@ The app expects `text_extractor` at `%USERPROFILE%\text_extractor` by default. S
 ### 1. Database Schema & RLS Execution
 
 1. Open your **Supabase Dashboard** -> **SQL Editor**.
-2. Run the SQL script from `supabase/migrations/00001_initial_schema.sql`.
-   * This creates `profiles`, `papers`, `questions`, `attempts`, and `attempt_answers` tables with unique indexes.
-   * Enables Row Level Security (RLS) on all tables.
-   * Configures trigger `on_auth_user_created` to automatically create user profiles upon sign up.
-   * Creates the trusted Postgres scoring stored procedure `submit_attempt_rpc`.
+2. Run `00001_initial_schema.sql` through `00005_pdf_vision_pipeline.sql` from `supabase/migrations/` in numeric order.
+   * These create the core schema, enable Row Level Security, configure user profiles and scoring, and add the application's TNPSC, BYOP, and PDF extraction tables.
+   * Migration `00003_tnpsc_features.sql` creates the private `user-papers` Storage bucket and authenticated per-user upload/read/delete policies used by the BYOP and Vercel PDF workflows.
+   * Do not also run `00000_combined_full_schema.sql` with the numbered migrations; it overlaps their schema.
 
 ### 2. Seed Sample UPSC Paper (Optional)
 
@@ -118,9 +115,21 @@ The Edge Function handles server-side answer verification, trusted scoring calcu
 
 ---
 
-## 🌐 Deployment
+## 🌐 Deploy frontend and backend to Vercel
 
-Deploy the project to a Python-capable host that can run Node.js during the build. Install the Python dependencies, set `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `GEMINI_API_KEY`, then run `npm start`. The Flask process serves both the frontend build and `/api/extract`; a frontend-only static deployment does not include the PDF extractor.
+The frontend and both Python API routes deploy from this repository as one Vercel project:
+
+1. Push the repository to GitHub and import it into Vercel.
+2. Set the project root to the repository root. Use `npm run build` as the build command and `dist` as the output directory.
+3. Add these Vercel environment variables for Production and any Preview environments that need them:
+   * `VITE_SUPABASE_URL` — the Supabase project URL.
+   * `VITE_SUPABASE_ANON_KEY` — the public anon/publishable key; never use the service-role key in frontend code.
+   * `GEMINI_API_KEY` — the Gemini API key, available only to the Python serverless functions.
+4. In Supabase Authentication URL Configuration, set the Site URL to the Vercel production URL and add the production and preview URLs to allowed redirect URLs.
+5. Apply migrations `00001` through `00005` in order. Migration `00003` creates the private `user-papers` bucket and policies used for BYOP and temporary PDF uploads. Keep the bucket's file-size limit at 35 MiB. Do not also run `00000_combined_full_schema.sql` alongside the numbered migrations.
+6. Deploy. Vercel maps `api/extract.py` to `/api/extract` and `api/extract-json.py` to `/api/extract-json`; the SPA fallback in `vercel.json` continues to serve client-side routes.
+
+PDFs are uploaded directly from the browser to Supabase Storage, then the API downloads them using a short-lived signed URL. This avoids Vercel's function request-body limit. Extraction is synchronous and must finish within the function's configured duration; very long documents may need to be split into background jobs. `/api/extract-json` uses Gemini and treats page 1 as a cover page.
 
 ---
 
@@ -131,6 +140,11 @@ Deploy the project to a Python-capable host that can run Node.js during the buil
 ├── README.md
 ├── index.html
 ├── package.json
+├── pdf_api.py
+├── requirements.txt
+├── api/
+│   ├── extract.py
+│   └── extract-json.py
 ├── tailwind.config.js
 ├── vercel.json
 ├── vite.config.js
