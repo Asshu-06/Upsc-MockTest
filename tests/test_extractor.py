@@ -52,7 +52,7 @@ class GeminiModelConfigurationTests(unittest.TestCase):
             self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), questions)
             self.assertEqual(
                 client.models.generate_content.call_args.kwargs["model"],
-                "gemini-3.8-flash",
+                test_extractor.GEMINI_MODEL,
             )
             self.assertEqual(
                 client_factory.call_args.kwargs["http_options"],

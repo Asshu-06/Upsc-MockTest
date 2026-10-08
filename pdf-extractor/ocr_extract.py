@@ -22,7 +22,7 @@ def extract_with_gemini(pdf_path, output_json_path):
 
     genai.configure(api_key=api_key)
     
-    model = genai.GenerativeModel('gemini-3.8-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     print(f"Opening {pdf_path}...")
     doc = fitz.open(pdf_path)

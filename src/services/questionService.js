@@ -210,6 +210,44 @@ export const questionService = {
     return data
   },
 
+  async getSavedExtractedDocuments(limit = 50) {
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError) throw authError
+    if (!user) throw new Error('Sign in to view saved extracted questions.')
+
+    const { data, error } = await supabase
+      .from('documents')
+      .select('id, file_name, total_pages, total_questions, created_at')
+      .eq('user_id', user.id)
+      .eq('processing_status', 'completed')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+    return data || []
+  },
+
+  async getSavedExtractedDocument(documentId) {
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError) throw authError
+    if (!user) throw new Error('Sign in to view saved extracted questions.')
+
+    const { data, error } = await supabase
+      .from('documents')
+      .select('id, file_name, extracted_summary')
+      .eq('id', documentId)
+      .eq('user_id', user.id)
+      .eq('processing_status', 'completed')
+      .single()
+
+    if (error) throw error
+    const questions = data.extracted_summary?.questions
+    if (!Array.isArray(questions)) {
+      throw new Error('This saved record does not contain a downloadable JSON question list.')
+    }
+    return { ...data, questions }
+  },
+
   async saveExtractedQuestions(documentId, paperId, extractedQuestions) {
     if (!extractedQuestions || extractedQuestions.length === 0) return []
 

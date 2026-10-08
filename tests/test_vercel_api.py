@@ -12,6 +12,7 @@ import pymupdf as fitz
 from pdf_api import (
     ApiError,
     PdfExtractionHandler,
+    create_wsgi_app,
     process_pdf,
     validate_signed_pdf_url,
     verify_supabase_user,
@@ -173,6 +174,36 @@ class PdfHandlerTests(unittest.TestCase):
 
         handler.send_response.assert_called_once_with(400)
         self.assertIn("signed URL", json.loads(handler.wfile.getvalue())["error"])
+
+    def test_wsgi_app_returns_json_for_pdf_extraction(self):
+        payload = {
+            "fileUrl": (
+                "https://example.supabase.co/storage/v1/object/sign/"
+                "user-papers/byop/user-id/paper.pdf?token=secret"
+            ),
+            "fileName": "questions.pdf",
+        }
+        request_body = json.dumps(payload).encode("utf-8")
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_LENGTH": str(len(request_body)),
+            "HTTP_AUTHORIZATION": "Bearer header.payload.signature",
+            "wsgi.input": io.BytesIO(request_body),
+        }
+        start_response = unittest.mock.Mock()
+        result = {"questions": [], "totalPages": 2}
+
+        with (
+            patch.dict(os.environ, {"VITE_SUPABASE_URL": "https://example.supabase.co"}),
+            patch("pdf_api.verify_supabase_user", return_value="user-id"),
+            patch("pdf_api.download_pdf", return_value=Path("questions.pdf")),
+            patch("pdf_api.process_pdf", return_value=result),
+        ):
+            response = b"".join(create_wsgi_app("extract")(environ, start_response))
+
+        start_response.assert_called_once()
+        self.assertTrue(start_response.call_args.args[0].startswith("200 "))
+        self.assertEqual(json.loads(response)["fileName"], "questions.pdf")
 
 
 if __name__ == "__main__":

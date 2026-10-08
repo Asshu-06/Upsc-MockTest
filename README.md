@@ -17,7 +17,7 @@ A full-stack UPSC Previous-Year Question Paper Practice Platform built using **R
 ### Admin Dashboard
 * **Paper CRUD & Publishing**: Create draft papers from a question JSON file, edit parameters, set duration/marking rules, and publish/unpublish/archive papers.
 * **Question Management**: Manual question entry with live preview, update, reorder, and answer key configuration.
-* **PDF-to-JSON and Paper Creation**: Use the repository's Gemini-backed page OCR, download the generated JSON, then upload that JSON while creating a paper. JSON imports into existing papers are also supported.
+* **PDF-to-JSON and Paper Creation**: Use the repository's Gemini-backed page OCR; extracted JSON is stored in the user's Supabase `documents.extracted_summary`, shown in the saved extraction history, and can be downloaded again. JSON imports into existing papers are also supported.
 * **System Attempts Reporting**: Track platform-wide user exam submissions and score metrics.
 
 ---

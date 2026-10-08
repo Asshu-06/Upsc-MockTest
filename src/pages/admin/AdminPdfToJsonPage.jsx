@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   AlertCircle, ArrowRight, CheckCircle2, Download, FileJson,
@@ -13,6 +13,29 @@ export function AdminPdfToJsonPage() {
   const [error, setError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [result, setResult] = useState(null)
+  const [savedDocuments, setSavedDocuments] = useState([])
+  const [savedQuestions, setSavedQuestions] = useState({})
+  const [viewingSavedId, setViewingSavedId] = useState(null)
+  const [loadingSavedId, setLoadingSavedId] = useState(null)
+  const [loadingSavedDocuments, setLoadingSavedDocuments] = useState(true)
+  const [historyError, setHistoryError] = useState('')
+
+  useEffect(() => {
+    let isCurrent = true
+    questionService.getSavedExtractedDocuments()
+      .then((documents) => {
+        if (isCurrent) setSavedDocuments(documents)
+      })
+      .catch((loadError) => {
+        if (isCurrent) {
+          setHistoryError(loadError.message || 'Could not load saved extracted JSON files.')
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setLoadingSavedDocuments(false)
+      })
+    return () => { isCurrent = false }
+  }, [])
 
   const handleFileChange = (event) => {
     const selectedFile = event.target.files?.[0] || null
@@ -43,28 +66,38 @@ export function AdminPdfToJsonPage() {
     try {
       const extracted = await extractQuestionsJsonFromPdf(file)
       setResult(extracted)
-
+      let savedDocument
       try {
-        const document = await questionService.saveExtractedDocument({
-          fileName: extracted.fileName,
-          totalPages: extracted.totalPages,
-          totalQuestions: extracted.questions.length,
-          summaryMetrics: {
-            format: 'question-json-v1',
-            questions: extracted.questions,
-          },
-        })
-        setResult((current) => current ? { ...current, documentId: document.id } : current)
+        savedDocument = await saveExtractedResult(extracted)
       } catch (saveFailure) {
         setSaveError(
-          `Extraction succeeded, but the JSON could not be saved to the database: ${saveFailure.message || 'Unknown database error.'} You can still preview and download it.`
+          `Extraction succeeded, but Supabase could not save this JSON: ${saveFailure.message || 'Unknown database error.'}`
         )
+        return
       }
+      setResult({ ...extracted, documentId: savedDocument.id })
+      setSavedDocuments((current) => [
+        savedDocument,
+        ...current.filter((document) => document.id !== savedDocument.id),
+      ])
     } catch (conversionError) {
-      setError(conversionError.message || 'Could not convert this PDF.')
+      setError(conversionError.message || 'Could not convert and save this PDF.')
     } finally {
       setConverting(false)
     }
+  }
+
+  const saveExtractedResult = async (extracted) => {
+    const document = await questionService.saveExtractedDocument({
+      fileName: extracted.fileName,
+      totalPages: extracted.totalPages,
+      totalQuestions: extracted.questions.length,
+      summaryMetrics: {
+        format: 'question-json-v1',
+        questions: extracted.questions,
+      },
+    })
+    return document
   }
 
   const handleSaveAgain = async () => {
@@ -72,16 +105,12 @@ export function AdminPdfToJsonPage() {
     setConverting(true)
     setSaveError('')
     try {
-      const document = await questionService.saveExtractedDocument({
-        fileName: result.fileName,
-        totalPages: result.totalPages,
-        totalQuestions: result.questions.length,
-        summaryMetrics: {
-          format: 'question-json-v1',
-          questions: result.questions,
-        },
-      })
+      const document = await saveExtractedResult(result)
       setResult((current) => current ? { ...current, documentId: document.id } : current)
+      setSavedDocuments((current) => [
+        document,
+        ...current.filter((savedDocument) => savedDocument.id !== document.id),
+      ])
     } catch (saveFailure) {
       setSaveError(
         `The JSON could not be saved to the database: ${saveFailure.message || 'Unknown database error.'}`
@@ -91,17 +120,60 @@ export function AdminPdfToJsonPage() {
     }
   }
 
-  const handleDownload = () => {
-    if (!result) return
-    const blob = new Blob([result.json], { type: 'application/json;charset=utf-8' })
+  const handleDownload = (questions, fileName) => {
+    if (!Array.isArray(questions)) return
+    const json = JSON.stringify(questions, null, 2)
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = 'extracted_questions.json'
+    link.download = `${fileName.replace(/\.pdf$/i, '') || 'extracted_questions'}.json`
     document.body.appendChild(link)
     link.click()
     link.remove()
-    URL.revokeObjectURL(url)
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  const getSavedQuestions = async (savedDocument) => {
+    if (Array.isArray(savedQuestions[savedDocument.id])) {
+      return savedQuestions[savedDocument.id]
+    }
+    const savedRecord = await questionService.getSavedExtractedDocument(savedDocument.id)
+    setSavedQuestions((current) => ({
+      ...current,
+      [savedDocument.id]: savedRecord.questions,
+    }))
+    return savedRecord.questions
+  }
+
+  const handleViewSavedDocument = async (savedDocument) => {
+    if (viewingSavedId === savedDocument.id) {
+      setViewingSavedId(null)
+      return
+    }
+    setLoadingSavedId(savedDocument.id)
+    setHistoryError('')
+    try {
+      await getSavedQuestions(savedDocument)
+      setViewingSavedId(savedDocument.id)
+    } catch (loadError) {
+      setHistoryError(loadError.message || 'Could not load this saved JSON file.')
+    } finally {
+      setLoadingSavedId(null)
+    }
+  }
+
+  const handleDownloadSavedDocument = async (savedDocument) => {
+    setLoadingSavedId(savedDocument.id)
+    setHistoryError('')
+    try {
+      const questions = await getSavedQuestions(savedDocument)
+      handleDownload(questions, savedDocument.file_name)
+    } catch (downloadError) {
+      setHistoryError(downloadError.message || 'Could not download this saved JSON file.')
+    } finally {
+      setLoadingSavedId(null)
+    }
   }
 
   const completeCount = result?.questions.filter((question) =>
@@ -131,7 +203,7 @@ export function AdminPdfToJsonPage() {
           <div>
             <h2 className="text-sm font-bold text-body-text">Step 1: Select a PDF</h2>
             <p className="mt-1 text-xs text-body-secondary">
-              This uses the configured Groq OCR service from text_extractor. It processes pages 2 onward; page 1 is treated as the cover.
+              This uses the configured Gemini OCR service. It processes pages 2 onward; page 1 is treated as the cover. Extracted JSON is saved to your Supabase account.
             </p>
           </div>
         </div>
@@ -170,7 +242,7 @@ export function AdminPdfToJsonPage() {
 
         {converting && (
           <p role="status" className="text-xs text-body-secondary">
-            text_extractor sends pages to Groq one at a time. Larger papers may take several minutes; the JSON is saved after extraction.
+            Pages are sent to Gemini one at a time. Larger papers may take several minutes; the extracted JSON will be saved to your Supabase account when processing completes.
           </p>
         )}
         {error && (
@@ -263,11 +335,11 @@ export function AdminPdfToJsonPage() {
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
-              onClick={handleDownload}
+              onClick={() => handleDownload(result.questions, result.fileName)}
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-emerald-700"
             >
               <Download className="h-4 w-4" />
-              Download extracted_questions.json
+              Download {result.fileName.replace(/\.pdf$/i, '')}.json
             </button>
             <Link
               to="/admin/papers/create"
@@ -279,6 +351,74 @@ export function AdminPdfToJsonPage() {
           </div>
         </section>
       )}
+
+      <section className="space-y-4 rounded-xl border border-surface-border bg-white p-6 shadow-card">
+        <div>
+          <h2 className="text-sm font-bold text-body-text">Saved JSON files</h2>
+          <p className="mt-1 text-xs text-body-secondary">
+            Your completed PDF extractions are stored in Supabase and available here for viewing or downloading.
+          </p>
+        </div>
+
+        {historyError && (
+          <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-status-error">
+            {historyError}
+          </div>
+        )}
+        {loadingSavedDocuments ? (
+          <p role="status" className="text-xs text-body-secondary">Loading saved JSON files…</p>
+        ) : savedDocuments.length === 0 ? (
+          <p className="rounded-lg bg-slate-50 p-4 text-xs text-body-secondary">
+            No saved extractions yet. Extract a PDF and its JSON will appear here.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {savedDocuments.map((savedDocument) => {
+              const questions = savedQuestions[savedDocument.id]
+              const isLoading = loadingSavedId === savedDocument.id
+              return (
+                <div key={savedDocument.id} className="rounded-lg border border-surface-border">
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3">
+                    <span className="min-w-0">
+                      <span className="block truncate text-xs font-semibold text-body-text">
+                        {savedDocument.file_name}
+                      </span>
+                      <span className="mt-1 block text-[11px] text-body-secondary">
+                        {savedDocument.total_questions} questions · {savedDocument.total_pages} pages ·{' '}
+                        {new Date(savedDocument.created_at).toLocaleString()}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleViewSavedDocument(savedDocument)}
+                        disabled={isLoading}
+                        className="rounded-md border border-surface-border px-3 py-1.5 text-[11px] font-bold text-body-text hover:bg-slate-50 disabled:opacity-50"
+                      >
+                        {isLoading ? 'Loading…' : viewingSavedId === savedDocument.id ? 'Hide JSON' : 'View JSON'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadSavedDocument(savedDocument)}
+                        disabled={isLoading}
+                        className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download JSON
+                      </button>
+                    </span>
+                  </div>
+                  {viewingSavedId === savedDocument.id && questions && (
+                    <pre className="max-h-96 overflow-auto border-t border-surface-border bg-slate-950 p-4 text-[11px] leading-relaxed text-slate-100">
+                      {JSON.stringify(questions, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </section>
     </div>
   )
 }

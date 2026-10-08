@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GEMINI_REQUEST_TIMEOUT_MS = 120_000
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 def _generate_content_with_retry(client, contents, page_num):
@@ -19,7 +20,7 @@ def _generate_content_with_retry(client, contents, page_num):
     for attempt in range(max_attempts):
         try:
             return client.models.generate_content(
-                model="gemini-3.8-flash",
+                model=GEMINI_MODEL,
                 contents=contents,
             )
         except (ServerError, httpx.TimeoutException) as error:

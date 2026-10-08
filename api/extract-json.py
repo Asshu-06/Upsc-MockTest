@@ -1,5 +1,4 @@
-from pdf_api import PdfExtractionHandler
+from pdf_api import create_wsgi_app
 
 
-class handler(PdfExtractionHandler):
-    extraction_mode = "extract-json"
+app = create_wsgi_app("extract-json")

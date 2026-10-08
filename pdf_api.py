@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import tempfile
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -177,69 +178,124 @@ class PdfExtractionHandler(BaseHTTPRequestHandler):
     extraction_mode = "extract"
 
     def do_POST(self):
+        content_length = self.headers.get("Content-Length", "0")
         try:
-            try:
-                content_length = int(self.headers.get("Content-Length", "0"))
-            except ValueError as error:
-                raise ApiError("Invalid request body length.", 400) from error
-            if content_length <= 0 or content_length > MAX_REQUEST_SIZE_BYTES:
-                raise ApiError("Invalid or oversized request body.", 413)
-
-            request_body = self.rfile.read(content_length)
-            try:
-                payload = json.loads(request_body)
-            except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                raise ApiError("The request body must be valid JSON.", 400) from error
-            if not isinstance(payload, dict):
-                raise ApiError("The request body must be a JSON object.", 400)
-
-            authorization = self.headers.get("Authorization", "")
-            auth_scheme, _, access_token = authorization.partition(" ")
-            access_token = access_token.strip()
-            if (
-                auth_scheme.lower() != "bearer"
-                or not re.fullmatch(
-                    r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-                    access_token,
-                )
-            ):
-                raise ApiError("Sign in before extracting a PDF.", 401)
-            user_id = verify_supabase_user(access_token)
-            file_url = validate_signed_pdf_url(payload.get("fileUrl"), user_id)
-            file_name = (
-                str(payload.get("fileName") or "document.pdf")
-                .replace("\\", "/")
-                .split("/")[-1]
-            )
-            file_name = re.sub(r"[\r\n]", "", file_name) or "document.pdf"
-            pdf_path = download_pdf(file_url, user_id)
-            result = process_pdf(pdf_path, self.extraction_mode)
-            result["fileName"] = file_name
-            self._send_json(200, result)
-        except ApiError as error:
-            self._send_json(error.status_code, {"error": str(error)})
-        except Exception:
-            LOGGER.exception("PDF API request failed")
-            self._send_json(500, {"error": "An unexpected PDF processing error occurred."})
+            declared_length = int(content_length)
+        except (ValueError, OverflowError):
+            declared_length = 0
+        request_body = b""
+        if 0 < declared_length <= MAX_REQUEST_SIZE_BYTES:
+            request_body = self.rfile.read(declared_length)
+        status_code, payload, extra_headers = handle_pdf_request(
+            self.extraction_mode,
+            "POST",
+            self.headers,
+            request_body,
+            content_length,
+        )
+        self._send_json(status_code, payload, extra_headers)
 
     def do_GET(self):
-        body = json.dumps(
-            {"error": "Use POST to submit a PDF for extraction."}
-        ).encode("utf-8")
-        self.send_response(405)
-        self.send_header("Allow", "POST")
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json(
+            405,
+            {"error": "Use POST to submit a PDF for extraction."},
+            {"Allow": "POST"},
+        )
 
-    def _send_json(self, status_code, payload):
+    def _send_json(self, status_code, payload, extra_headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, format_string, *args):
         LOGGER.info("%s - %s", self.address_string(), format_string % args)
+
+
+def handle_pdf_request(extraction_mode, method, headers, request_body, content_length):
+    if method != "POST":
+        return 405, {"error": "Use POST to submit a PDF for extraction."}, {"Allow": "POST"}
+
+    try:
+        try:
+            content_length = int(content_length)
+        except (TypeError, ValueError) as error:
+            raise ApiError("Invalid request body length.", 400) from error
+        if content_length <= 0 or content_length > MAX_REQUEST_SIZE_BYTES:
+            raise ApiError("Invalid or oversized request body.", 413)
+        if len(request_body) != content_length:
+            raise ApiError("The request body is incomplete.", 400)
+
+        try:
+            payload = json.loads(request_body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ApiError("The request body must be valid JSON.", 400) from error
+        if not isinstance(payload, dict):
+            raise ApiError("The request body must be a JSON object.", 400)
+
+        authorization = headers.get("Authorization", "")
+        auth_scheme, _, access_token = authorization.partition(" ")
+        access_token = access_token.strip()
+        if (
+            auth_scheme.lower() != "bearer"
+            or not re.fullmatch(
+                r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+                access_token,
+            )
+        ):
+            raise ApiError("Sign in before extracting a PDF.", 401)
+        user_id = verify_supabase_user(access_token)
+        file_url = validate_signed_pdf_url(payload.get("fileUrl"), user_id)
+        file_name = (
+            str(payload.get("fileName") or "document.pdf")
+            .replace("\\", "/")
+            .split("/")[-1]
+        )
+        file_name = re.sub(r"[\r\n]", "", file_name) or "document.pdf"
+        pdf_path = download_pdf(file_url, user_id)
+        result = process_pdf(pdf_path, extraction_mode)
+        result["fileName"] = file_name
+        return 200, result, {}
+    except ApiError as error:
+        return error.status_code, {"error": str(error)}, {}
+    except Exception:
+        LOGGER.exception("PDF API request failed")
+        return 500, {"error": "An unexpected PDF processing error occurred."}, {}
+
+
+def create_wsgi_app(extraction_mode):
+    def app(environ, start_response):
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        content_length = environ.get("CONTENT_LENGTH", "0")
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError):
+            declared_length = 0
+
+        request_body = b""
+        if 0 < declared_length <= MAX_REQUEST_SIZE_BYTES:
+            request_body = environ["wsgi.input"].read(declared_length)
+
+        headers = {"Authorization": environ.get("HTTP_AUTHORIZATION", "")}
+        status_code, payload, extra_headers = handle_pdf_request(
+            extraction_mode,
+            method,
+            headers,
+            request_body,
+            content_length,
+        )
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        response_headers = [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+            *extra_headers.items(),
+        ]
+        status = f"{status_code} {HTTPStatus(status_code).phrase}"
+        start_response(status, response_headers)
+        return [body]
+
+    return app

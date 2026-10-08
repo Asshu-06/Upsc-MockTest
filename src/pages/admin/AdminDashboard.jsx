@@ -112,7 +112,7 @@ export function AdminDashboard() {
         {[
           { title: 'Papers',           path: '/admin/papers',          icon: FileText,  desc: 'Create, import and publish question papers' },
           { title: 'Questions',        path: '/admin/questions',       icon: HelpCircle,desc: 'Manage the full question bank' },
-          { title: 'PDF to JSON',      path: '/admin/pdf-to-json',      icon: FileJson,   desc: 'Use text_extractor OCR to create downloadable question JSON' },
+          { title: 'PDF to JSON',      path: '/admin/pdf-to-json',      icon: FileJson,   desc: 'Extract, save, view, and download question JSON' },
           { title: 'Current Affairs',  path: '/admin/current-affairs', icon: Newspaper, desc: 'Add and publish current affairs articles' },
           { title: 'Govt Notifications',path: '/admin/notifications',  icon: BellRing,  desc: 'Manage vacancies and official notifications' },
           { title: 'Syllabus',         path: '/admin/syllabus',        icon: BookMarked,desc: 'Build the exam syllabus hierarchy' },

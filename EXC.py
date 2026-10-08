@@ -53,7 +53,7 @@ def extract_all_questions(pdf_path: str, output_json_path: str = "extracted_ques
             """
 
             response = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-2.5-flash',
                 contents=[uploaded_file, prompt]
             )
 

@@ -26,7 +26,11 @@ export async function postPdfForExtraction(fileInput, endpoint, requestedFileNam
     try {
       result = await response.json()
     } catch {
-      throw new Error('The PDF extraction service returned an invalid response.')
+      const contentType = response.headers.get('content-type') || 'unknown content type'
+      throw new Error(
+        `The PDF extraction service returned a non-JSON response (HTTP ${response.status}; ${contentType}). ` +
+        'Check that the Vercel API function deployed successfully.',
+      )
     }
     if (!response.ok) {
       throw new Error(result.error || `PDF extraction failed (HTTP ${response.status}).`)
