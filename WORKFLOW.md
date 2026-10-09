@@ -39,16 +39,13 @@ Go to: https://supabase.com/dashboard/project/gmwfgtnejfblmrmtmebh/storage/bucke
 
 OR run the SQL at the bottom of `00003_tnpsc_features.sql`.
 
-### 1.4 Deploy Edge Function
+### 1.4 Deploy the application and PDF API
 ```powershell
-# Get token from: https://supabase.com/dashboard/account/tokens
-npx supabase login --token YOUR_TOKEN
-npx supabase functions deploy extract-pdf-questions --project-ref gmwfgtnejfblmrmtmebh
+npx vercel --prod
 ```
 
-### 1.5 Set Gemini API Key Secret
-Go to: https://supabase.com/dashboard/project/gmwfgtnejfblmrmtmebh/settings/vault  
-Add secret: `GEMINI_API_KEY` = your Google Gemini API key
+### 1.5 Set Groq API Key
+In Vercel Project Settings → Environment Variables, add `GROQ_API_KEY` for Production (and Preview if used), then redeploy. Keep the key server-side; never add a `VITE_` prefix or commit its value.
 
 ### 1.6 Run Locally
 ```powershell
@@ -206,7 +203,7 @@ The **exam selector in the sidebar** changes:
 2. Click **Upload Paper** → select PDF/JPG/PNG
 3. File uploads to Supabase Storage bucket `user-papers`
 4. Record created in `uploaded_papers` table (status: uploaded)
-5. Click **Process** → calls Gemini AI edge function
+5. Click **Process** → calls the Vercel PDF API and Groq vision OCR
 6. AI extracts questions page by page
 7. If successful: questions saved, draft paper created, status → ready
 8. If failed: status → failed, click Retry
@@ -385,7 +382,7 @@ Create notification (active)   →  government_notifications  →  Dashboard + /
 | Mock Tests page empty | No papers with `exam_name` matching selected exam | Admin → /admin/papers → create paper, set exam_name exactly (e.g. "TNPSC Group 4") |
 | Current Affairs empty | No published articles | Admin → /admin/current-affairs → create and publish |
 | BYOP upload fails with RLS error | Storage policy issue | Run storage SQL from `00003_tnpsc_features.sql` |
-| BYOP process fails | Edge function not deployed OR Gemini key missing | Deploy edge function + set GEMINI_API_KEY secret |
+| BYOP process fails | Vercel PDF API deployment or Groq key configuration | Check Vercel Function Logs and set `GROQ_API_KEY` in Vercel |
 | Syllabus not updating on exam switch | - | Already fixed: key={selectedExam} forces remount |
 | Admin can't access /admin | User not in admin role | Run: `UPDATE profiles SET role='admin' WHERE email='your@email.com';` |
 
@@ -401,7 +398,7 @@ Create notification (active)   →  government_notifications  →  Dashboard + /
 | Charts | Recharts |
 | Icons | Lucide React |
 | Backend | Supabase (PostgreSQL + Auth + Storage + Edge Functions) |
-| AI/OCR | Google Gemini API (via Supabase Edge Function) |
+| AI/OCR | Groq vision API (via Vercel Python Function) |
 | PDF parsing | pdfjs-dist (client-side rendering to canvas) |
 | CSV parsing | PapaParse |
 | State | React Context (AuthContext + AppContext) |
@@ -465,7 +462,7 @@ src/
 │   ├── attemptService.js            — attempts + getUserAttemptsByExam
 │   ├── questionService.js           — questions CRUD + batch import
 │   ├── authService.js               — auth helpers
-│   ├── geminiOcrService.js          — PDF → canvas → edge function → questions
+│   ├── geminiOcrService.js          — legacy-named wrapper to Vercel PDF extraction
 │   └── storageService.js            — file storage helpers
 ├── hooks/
 │   ├── useAuth.js                   — useAuth hook
@@ -485,5 +482,5 @@ supabase/
 │   └── 00004_admin_cms.sql
 └── functions/
     └── extract-pdf-questions/
-        └── index.ts                 — Gemini API caller with model fallback
+        └── index.ts                 — obsolete legacy Gemini function; not used by current app
 ```

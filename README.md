@@ -17,7 +17,7 @@ A full-stack UPSC Previous-Year Question Paper Practice Platform built using **R
 ### Admin Dashboard
 * **Paper CRUD & Publishing**: Create draft papers from a question JSON file, edit parameters, set duration/marking rules, and publish/unpublish/archive papers.
 * **Question Management**: Manual question entry with live preview, update, reorder, and answer key configuration.
-* **PDF-to-JSON and Paper Creation**: Use the repository's Gemini-backed page OCR; extracted JSON is stored in the user's Supabase `documents.extracted_summary`, shown in the saved extraction history, and can be downloaded again. JSON imports into existing papers are also supported.
+* **PDF-to-JSON and Paper Creation**: Use the repository's Groq vision-backed page OCR; extracted JSON is stored in the user's Supabase `documents.extracted_summary`, shown in the saved extraction history, and can be downloaded again. JSON imports into existing papers are also supported.
 * **System Attempts Reporting**: Track platform-wide user exam submissions and score metrics.
 
 ---
@@ -27,7 +27,7 @@ A full-stack UPSC Previous-Year Question Paper Practice Platform built using **R
 * **Frontend**: React.js 18, Vite, Tailwind CSS, React Router v6, Lucide React Icons, React Hook Form, Zod, Recharts.
 * **Backend & Security**: Supabase (PostgreSQL, Supabase Auth, Supabase Storage, Row Level Security, Supabase Edge Functions).
 * **Application hosting**: Vercel serves the built React app and runs the Python PDF APIs as serverless functions.
-* **PDF question extraction**: Both PDF workflows use the repository's Gemini-backed OCR extractor. PDFs are uploaded to the authenticated Supabase `user-papers` bucket and passed to the API as signed URLs, avoiding Vercel's request-body upload limit.
+* **PDF question extraction**: Both PDF workflows use the repository's Groq vision-backed OCR extractor. PDFs are uploaded to the authenticated Supabase `user-papers` bucket and passed to the API as signed URLs, avoiding Vercel's request-body upload limit.
 
 ---
 
@@ -48,16 +48,30 @@ Copy `.env.example` to `.env`:
 ```env
 VITE_SUPABASE_URL=https://your-supabase-project.supabase.co
 VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
-GEMINI_API_KEY=your-gemini-api-key
+GROQ_API_KEY=your-groq-api-key
 ```
 
-For local frontend development, run:
+For local development, first create an ignored `.env.local` file containing your Supabase settings and a newly generated Groq key. Do not reuse a key that was shared in chat:
+
+```env
+VITE_SUPABASE_URL=https://your-supabase-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-supabase-anon-key
+GROQ_API_KEY=your-new-groq-api-key
+```
+
+Run the local API and frontend in two PowerShell terminals from the repository root:
 
 ```powershell
+# Terminal 1 — Python API; reads GROQ_API_KEY from .env.local
+.\.venv\Scripts\python.exe .\local_api.py
+```
+
+```powershell
+# Terminal 2 — Vite frontend, with /api requests proxied to the local Python API
 npm run dev
 ```
 
-To run the Vercel Python functions locally too, use the Vercel CLI from the repository root with `npx vercel dev`. PDF OCR uses `GEMINI_API_KEY`; never expose it through a `VITE_` variable or put it in browser code.
+Open `http://localhost:3000`. PDF OCR uses `GROQ_API_KEY` only on the server; never expose it through a `VITE_` variable or put it in browser code. Vercel deployments use the same Python API handlers in `api/`.
 
 ---
 
@@ -124,12 +138,12 @@ The frontend and both Python API routes deploy from this repository as one Verce
 3. Add these Vercel environment variables for Production and any Preview environments that need them:
    * `VITE_SUPABASE_URL` — the Supabase project URL.
    * `VITE_SUPABASE_ANON_KEY` — the public anon/publishable key; never use the service-role key in frontend code.
-   * `GEMINI_API_KEY` — the Gemini API key, available only to the Python serverless functions.
+   * `GROQ_API_KEY` — the Groq API key, available only to the Python serverless functions.
 4. In Supabase Authentication URL Configuration, set the Site URL to the Vercel production URL and add the production and preview URLs to allowed redirect URLs.
 5. Apply migrations `00001` through `00005` in order. Migration `00003` creates the private `user-papers` bucket and policies used for BYOP and temporary PDF uploads. Keep the bucket's file-size limit at 35 MiB. Do not also run `00000_combined_full_schema.sql` alongside the numbered migrations.
 6. Deploy. Vercel maps `api/extract.py` to `/api/extract` and `api/extract-json.py` to `/api/extract-json`; the SPA fallback in `vercel.json` continues to serve client-side routes.
 
-PDFs are uploaded directly from the browser to Supabase Storage, then the API downloads them using a short-lived signed URL. This avoids Vercel's function request-body limit. Extraction is synchronous and must finish within the function's configured duration; very long documents may need to be split into background jobs. `/api/extract-json` uses Gemini and treats page 1 as a cover page.
+PDFs are uploaded directly from the browser to Supabase Storage, then the API downloads them using a short-lived signed URL. This avoids Vercel's function request-body limit. Extraction is synchronous and must finish within the function's configured duration; very long documents may need to be split into background jobs. `/api/extract-json` uses Groq vision and treats page 1 as a cover page.
 
 ---
 

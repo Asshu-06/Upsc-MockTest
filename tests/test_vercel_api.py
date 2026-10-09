@@ -17,6 +17,7 @@ from pdf_api import (
     validate_signed_pdf_url,
     verify_supabase_user,
 )
+from local_api import app as local_api_app
 
 
 class SignedPdfUrlTests(unittest.TestCase):
@@ -204,6 +205,24 @@ class PdfHandlerTests(unittest.TestCase):
         start_response.assert_called_once()
         self.assertTrue(start_response.call_args.args[0].startswith("200 "))
         self.assertEqual(json.loads(response)["fileName"], "questions.pdf")
+
+    def test_local_api_routes_are_available_without_vercel(self):
+        for path in ("/api/extract", "/api/extract-json"):
+            with self.subTest(path=path):
+                environ = {
+                    "PATH_INFO": path,
+                    "REQUEST_METHOD": "GET",
+                    "CONTENT_LENGTH": "0",
+                    "wsgi.input": io.BytesIO(),
+                }
+                start_response = unittest.mock.Mock()
+                response = b"".join(local_api_app(environ, start_response))
+
+                self.assertTrue(start_response.call_args.args[0].startswith("405 "))
+                self.assertEqual(
+                    json.loads(response),
+                    {"error": "Use POST to submit a PDF for extraction."},
+                )
 
 
 if __name__ == "__main__":

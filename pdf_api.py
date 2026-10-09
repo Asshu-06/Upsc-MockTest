@@ -12,6 +12,7 @@ import httpx
 import pymupdf as fitz
 
 import test_extractor
+from test_extractor import GroqAPIError
 
 LOGGER = logging.getLogger(__name__)
 MAX_PDF_SIZE_BYTES = 35 * 1024 * 1024
@@ -158,10 +159,20 @@ def process_pdf(pdf_path, mode):
         raise
     except (fitz.FileDataError, ValueError) as error:
         raise ApiError("The uploaded file is not a readable PDF.", 400) from error
+    except GroqAPIError as error:
+        LOGGER.warning("Groq rejected PDF OCR request (HTTP %s)", error.status_code)
+        status_code = (
+            error.status_code
+            if error.status_code in (413, 429)
+            else 503
+            if error.status_code in (401, 403) or error.status_code >= 500
+            else 502
+        )
+        raise ApiError(str(error), status_code) from error
     except RuntimeError as error:
-        if "GEMINI_API_KEY" in str(error):
+        if "GROQ_API_KEY" in str(error):
             raise ApiError(
-                "The PDF OCR service is not configured. Set GEMINI_API_KEY in Vercel environment variables.",
+                "The PDF OCR service is not configured. Set GROQ_API_KEY in Vercel environment variables.",
                 503,
             ) from error
         LOGGER.exception("PDF question extraction failed")

@@ -203,7 +203,7 @@ export function AdminPdfToJsonPage() {
           <div>
             <h2 className="text-sm font-bold text-body-text">Step 1: Select a PDF</h2>
             <p className="mt-1 text-xs text-body-secondary">
-              This uses the configured Gemini OCR service. It processes pages 2 onward; page 1 is treated as the cover. Extracted JSON is saved to your Supabase account.
+              This uses the configured Groq vision OCR service. It processes pages 2 onward; page 1 is treated as the cover. Extracted JSON is saved to your Supabase account.
             </p>
           </div>
         </div>
@@ -242,7 +242,7 @@ export function AdminPdfToJsonPage() {
 
         {converting && (
           <p role="status" className="text-xs text-body-secondary">
-            Pages are sent to Gemini one at a time. Larger papers may take several minutes; the extracted JSON will be saved to your Supabase account when processing completes.
+            Pages are sent to Groq one at a time. Larger papers may take several minutes; the extracted JSON will be saved to your Supabase account when processing completes.
           </p>
         )}
         {error && (
