@@ -38,5 +38,8 @@ export const questionSchema = z.object({
   option_c: z.string().min(1, 'Option C is required'),
   option_d: z.string().min(1, 'Option D is required'),
   correct_option: z.enum(['A', 'B', 'C', 'D'], { required_error: 'Please select correct answer' }),
-  explanation: z.string().optional()
+  explanation: z.string().optional(),
+  unit_name: z.string().optional(),
+  topic_name: z.string().optional(),
+  subject: z.string().optional()
 })

@@ -39,7 +39,9 @@ export function QuestionManagementPage() {
       option_c: '',
       option_d: '',
       correct_option: 'A',
-      explanation: ''
+      explanation: '',
+      unit_name: '',
+      topic_name: ''
     }
   })
 
@@ -79,7 +81,9 @@ export function QuestionManagementPage() {
       option_c: '',
       option_d: '',
       correct_option: 'A',
-      explanation: ''
+      explanation: '',
+      unit_name: '',
+      topic_name: ''
     })
     setShowModal(true)
   }
@@ -94,7 +98,9 @@ export function QuestionManagementPage() {
       option_c: q.option_c,
       option_d: q.option_d,
       correct_option: q.correct_option || 'A',
-      explanation: q.explanation || ''
+      explanation: q.explanation || '',
+      unit_name: q.unit_name || '',
+      topic_name: q.topic_name || ''
     })
     setShowModal(true)
   }
@@ -230,6 +236,16 @@ export function QuestionManagementPage() {
                   <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                     Correct Option: {q.correct_option || 'None'}
                   </span>
+                  {q.unit_name && (
+                    <span className="text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                      Unit: {q.unit_name}
+                    </span>
+                  )}
+                  {q.topic_name && (
+                    <span className="text-[11px] font-semibold text-tnpsc-brand bg-tnpsc-brand-light px-2 py-0.5 rounded border border-tnpsc-brand/20">
+                      Topic: {q.topic_name}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -316,6 +332,33 @@ export function QuestionManagementPage() {
                   className="w-full px-3 py-2 rounded-xl border border-surface-border text-xs focus:ring-2 focus:ring-primary outline-none"
                 />
                 {errors.question_text && <p className="text-xs text-status-error">{errors.question_text.message}</p>}
+              </div>
+
+              {/* Unit (Macro Topic) & Micro Topic */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-1">
+                    Unit / Macro Topic
+                  </label>
+                  <input
+                    type="text"
+                    {...register('unit_name')}
+                    placeholder="e.g. பகுதி (அ) - இலக்கணம் or Unit 1: General Science"
+                    className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs outline-none focus:ring-2 focus:ring-primary"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-body-text uppercase tracking-wider mb-1">
+                    Micro Topic
+                  </label>
+                  <input
+                    type="text"
+                    {...register('topic_name')}
+                    placeholder="e.g. பொருத்துதல் or Fundamental Rights"
+                    className="w-full px-3 py-2 rounded-lg border border-surface-border text-xs outline-none focus:ring-2 focus:ring-primary"
+                  />
+                </div>
               </div>
 
               {/* Options */}

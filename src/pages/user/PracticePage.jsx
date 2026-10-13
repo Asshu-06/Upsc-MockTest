@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Brain, Play, Clock, Zap, BookOpen, Loader2, CheckCircle2, XCircle,
-  ChevronLeft, ChevronRight, AlertCircle, BarChart3, Timer,
+  ChevronLeft, ChevronRight, AlertCircle, BarChart3, Timer, Target
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
@@ -20,23 +20,35 @@ function PracticeBuilder({ onStart }) {
   const { selectedExam } = useApp()
   const { toast } = useApp()
   const { user }  = useAuth()
+  const [searchParams] = useSearchParams()
+  const urlMicroTopic = searchParams.get('micro_topic')
+  const urlSubject = searchParams.get('subject')
 
   const [subjects, setSubjects]   = useState(['All Subjects'])
   const [subjectsLoading, setSubjectsLoading] = useState(true)
 
   const [config, setConfig] = useState({
-    subject: 'All Subjects', question_count: 25,
-    timer_mode: 'strict', difficulty: 'adaptive', exam_context: selectedExam,
+    subject: urlSubject || 'All Subjects',
+    micro_topic: urlMicroTopic || '',
+    question_count: 25,
+    timer_mode: 'strict',
+    difficulty: 'adaptive',
+    exam_context: selectedExam,
   })
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
 
   // Fetch subjects from syllabus_units for the selected exam
   useEffect(() => {
-    setConfig(c => ({ ...c, subject: 'All Subjects', exam_context: selectedExam }))
+    setConfig(c => ({
+      ...c,
+      subject: urlSubject || c.subject || 'All Subjects',
+      micro_topic: urlMicroTopic || c.micro_topic || '',
+      exam_context: selectedExam
+    }))
     setError(null)
     loadSubjects()
-  }, [selectedExam])
+  }, [selectedExam, urlSubject, urlMicroTopic])
 
   async function loadSubjects() {
     setSubjectsLoading(true)
@@ -105,6 +117,29 @@ function PracticeBuilder({ onStart }) {
       </div>
 
       <div className="bg-white rounded-2xl border border-surface-border shadow-subtle p-6 space-y-6">
+        {/* Micro-Topic Indicator if navigated from X-Ray or Syllabus */}
+        {config.micro_topic && (
+          <div className="bg-[#f0eeff] border border-[#ddd7ff] rounded-xl p-3.5 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Target className="w-5 h-5 text-[#635bff] shrink-0" />
+              <div>
+                <span className="text-[10px] font-bold text-[#635bff] uppercase tracking-wider block">
+                  Targeted Chapter / Micro-Topic
+                </span>
+                <span className="text-sm font-black text-[#172033] block">
+                  {config.micro_topic}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={() => setConfig(c => ({ ...c, micro_topic: '' }))}
+              className="text-xs text-[#64748b] hover:text-[#172033] font-semibold underline px-2 py-1"
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
         {/* Subject */}
         <div>
           <label className="block text-sm font-bold text-body-text mb-2">Target Subject</label>

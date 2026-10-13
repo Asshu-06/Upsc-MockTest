@@ -86,6 +86,8 @@ function normalizeExtractedQuestions(rawQuestions = []) {
   })
 }
 
+import { classifyQuestion } from './topicClassifier'
+
 export function mapQuestionsForPreview(questions = []) {
   return questions.map((q) => {
     const isArr = Array.isArray(q.options)
@@ -109,8 +111,17 @@ export function mapQuestionsForPreview(questions = []) {
     if (!option_c) errors.push('Missing Option C')
     if (!option_d) errors.push('Missing Option D')
 
+    // Automatically classify unit (macro topic) & micro topic if not explicitly set
+    const classification = classifyQuestion(q)
+    const unit_name = q.unit_name || q.unit || classification.unit_name
+    const topic_name = q.topic_name || q.topic || q.micro_topic || classification.topic_name
+    const subject = q.subject || classification.subject
+
     return {
       ...q,
+      subject,
+      unit_name,
+      topic_name,
       option_a,
       option_b,
       option_c,

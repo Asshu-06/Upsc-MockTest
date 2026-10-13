@@ -52,6 +52,11 @@ export function QuestionCard({
           <span className="text-xs text-body-secondary font-medium">
             Question {question.question_number} of {totalQuestions}
           </span>
+          {question.topic_name && (
+            <span className="hidden sm:inline-block text-[11px] font-semibold text-tnpsc-brand bg-tnpsc-brand-light px-2 py-0.5 rounded-full border border-tnpsc-brand/20">
+              {question.topic_name}
+            </span>
+          )}
         </div>
 
         {/* Review mode status pill OR Exam mode flag button */}

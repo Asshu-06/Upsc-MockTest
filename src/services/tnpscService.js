@@ -3,6 +3,7 @@
  * All Supabase queries for TNPSC-specific features.
  */
 import { supabase } from '../lib/supabase'
+import { classifyQuestion, calculateMicroTopicXRay } from './topicClassifier'
 
 // ─── Current Affairs ────────────────────────────────────────────────────────
 export const currentAffairsService = {
@@ -107,7 +108,18 @@ export const syllabusService = {
       .eq('exam_id', exam.id)
       .order('unit_number')
     if (error) throw error
-    return units ?? []
+
+    // Deduplicate units by unit_number and unit_name so nothing appears doubled
+    const seen = new Set()
+    const uniqueUnits = []
+    for (const u of (units ?? [])) {
+      const key = `${u.unit_number || ''}-${u.unit_name?.trim()?.toLowerCase() || ''}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        uniqueUnits.push(u)
+      }
+    }
+    return uniqueUnits
   },
 
   async getUserProgress(userId) {
@@ -233,8 +245,27 @@ export const practiceService = {
       q = q.in('paper_id', paperIds)
     }
 
-    const { data: pool, error: poolErr } = await q.limit(200)
-    if (poolErr) throw poolErr
+    // Filter by micro_topic_id or micro_topic_name if specified
+    if (config.micro_topic_id) {
+      q = q.eq('micro_topic_id', config.micro_topic_id)
+    } else if (config.micro_topic && config.micro_topic !== 'All Topics') {
+      q = q.or(`micro_topic_name.ilike.%${config.micro_topic}%,topic_name.ilike.%${config.micro_topic}%`)
+    }
+
+    let { data: pool, error: poolErr } = await q.limit(200)
+    if (poolErr || !pool || pool.length === 0) {
+      // Fallback: broaden search if micro topic had zero questions
+      let fallbackQ = supabase
+        .from('questions')
+        .select('id, question_text, option_a, option_b, option_c, option_d, correct_option')
+        .not('correct_option', 'is', null)
+      if (paperIds.length > 0) {
+        fallbackQ = fallbackQ.in('paper_id', paperIds)
+      }
+      const { data: fbPool } = await fallbackQ.limit(200)
+      pool = fbPool ?? []
+    }
+
     if (!pool || pool.length === 0) {
       throw new Error(
         paperIds.length > 0
@@ -420,7 +451,7 @@ export const analyticsService = {
   async getOverview(userId, examName = null) {
     let q = supabase
       .from('attempts')
-      .select('*, papers(title, subject, exam_name), attempt_answers(*, questions(question_text, correct_option))')
+      .select('*, papers(title, subject, exam_name), attempt_answers(*, questions(*))')
       .eq('user_id', userId)
       .eq('status', 'completed')
       .order('submitted_at', { ascending: false })
@@ -444,21 +475,103 @@ export const analyticsService = {
     const avgScore       = list.reduce((s, a) => s + Number(a.score     ?? 0), 0) / totalAttempts
     const avgAccuracy    = list.reduce((s, a) => s + Number(a.accuracy  ?? 0), 0) / totalAttempts
 
-    // Subject breakdown
+    // Subject breakdown with nested Unit (Macro Topic) & Micro Topic hierarchy
     const subjectMap = {}
     list.forEach(a => {
-      const subj = a.papers?.subject ?? 'General'
-      if (!subjectMap[subj]) subjectMap[subj] = { correct: 0, total: 0, count: 0 }
-      subjectMap[subj].correct += a.correct_count ?? 0
-      subjectMap[subj].total   += (a.correct_count + a.incorrect_count + a.unanswered_count)
-      subjectMap[subj].count   += 1
+      const defaultSubj = a.papers?.subject ?? 'General Studies'
+      
+      if (Array.isArray(a.attempt_answers) && a.attempt_answers.length > 0) {
+        a.attempt_answers.forEach(ans => {
+          const q = ans.questions || {}
+          const classification = classifyQuestion(q, a.papers)
+          const subj = classification.subject || defaultSubj
+          const unit = classification.unit_name || `${subj} - Core Unit`
+          const topic = classification.topic_name || 'General Concepts'
+
+          const isCorrect = ans.is_correct ?? (Boolean(ans.selected_option) && ans.selected_option === q.correct_option)
+          const isSkipped = !ans.selected_option
+          const isWrong = !isSkipped && !isCorrect
+
+          if (!subjectMap[subj]) {
+            subjectMap[subj] = { correct: 0, wrong: 0, skipped: 0, total: 0, count: 0, units: {} }
+          }
+          subjectMap[subj].total += 1
+          if (isCorrect) subjectMap[subj].correct += 1
+          else if (isWrong) subjectMap[subj].wrong += 1
+          else subjectMap[subj].skipped += 1
+
+          if (!subjectMap[subj].units[unit]) {
+            subjectMap[subj].units[unit] = { correct: 0, wrong: 0, skipped: 0, total: 0, microTopics: {} }
+          }
+          subjectMap[subj].units[unit].total += 1
+          if (isCorrect) subjectMap[subj].units[unit].correct += 1
+          else if (isWrong) subjectMap[subj].units[unit].wrong += 1
+          else subjectMap[subj].units[unit].skipped += 1
+
+          if (!subjectMap[subj].units[unit].microTopics[topic]) {
+            subjectMap[subj].units[unit].microTopics[topic] = { correct: 0, wrong: 0, skipped: 0, total: 0 }
+          }
+          subjectMap[subj].units[unit].microTopics[topic].total += 1
+          if (isCorrect) subjectMap[subj].units[unit].microTopics[topic].correct += 1
+          else if (isWrong) subjectMap[subj].units[unit].microTopics[topic].wrong += 1
+          else subjectMap[subj].units[unit].microTopics[topic].skipped += 1
+        })
+      } else {
+        const subj = defaultSubj
+        if (!subjectMap[subj]) {
+          subjectMap[subj] = { correct: 0, wrong: 0, skipped: 0, total: 0, count: 0, units: {} }
+        }
+        const tot = (a.correct_count ?? 0) + (a.incorrect_count ?? 0) + (a.unanswered_count ?? 0)
+        subjectMap[subj].correct += a.correct_count ?? 0
+        subjectMap[subj].wrong   += a.incorrect_count ?? 0
+        subjectMap[subj].skipped += a.unanswered_count ?? 0
+        subjectMap[subj].total   += tot
+        subjectMap[subj].count   += 1
+
+        const defaultUnit = `${subj} - Overall`
+        if (!subjectMap[subj].units[defaultUnit]) {
+          subjectMap[subj].units[defaultUnit] = {
+            correct: a.correct_count ?? 0,
+            wrong: a.incorrect_count ?? 0,
+            skipped: a.unanswered_count ?? 0,
+            total: tot,
+            microTopics: {
+              'Exam Questions': {
+                correct: a.correct_count ?? 0,
+                wrong: a.incorrect_count ?? 0,
+                skipped: a.unanswered_count ?? 0,
+                total: tot
+              }
+            }
+          }
+        }
+      }
     })
+
     const subjectBreakdown = Object.entries(subjectMap).map(([subject, v]) => ({
       subject,
       accuracy:  v.total ? ((v.correct / v.total) * 100).toFixed(1) : '0',
       attempted: v.total,
       correct:   v.correct,
+      wrong:     v.wrong,
+      skipped:   v.skipped,
       count:     v.count,
+      units: Object.entries(v.units).map(([unitName, u]) => ({
+        unit: unitName,
+        accuracy: u.total ? ((u.correct / u.total) * 100).toFixed(1) : '0',
+        attempted: u.total,
+        correct: u.correct,
+        wrong: u.wrong,
+        skipped: u.skipped,
+        microTopics: Object.entries(u.microTopics).map(([topicName, m]) => ({
+          topic: topicName,
+          accuracy: m.total ? ((m.correct / m.total) * 100).toFixed(1) : '0',
+          attempted: m.total,
+          correct: m.correct,
+          wrong: m.wrong,
+          skipped: m.skipped
+        })).sort((a, b) => b.attempted - a.attempted)
+      })).sort((a, b) => b.attempted - a.attempted)
     }))
 
     // Recent trend (last 8 attempts)
@@ -468,6 +581,9 @@ export const analyticsService = {
       accuracy: Number(a.accuracy ?? 0).toFixed(1),
       date:     a.submitted_at,
     }))
+
+    // Micro-Topic X-Ray Deep Scan
+    const xray = calculateMicroTopicXRay(list)
 
     return {
       hasData: true,
@@ -480,6 +596,7 @@ export const analyticsService = {
       avgAccuracy: avgAccuracy.toFixed(1),
       subjectBreakdown,
       trend,
+      xray,
       recentAttempts: list.slice(0, 5),
     }
   },

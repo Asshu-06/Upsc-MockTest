@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase'
+import { classifyQuestion } from './topicClassifier'
 
 // ─── Dashboard stats ──────────────────────────────────────────────────────────
 export const adminStatsService = {
@@ -301,7 +302,7 @@ export const adminAnalyticsService = {
   async get() {
     const [attRes, qRes, userRes] = await Promise.allSettled([
       supabase.from('attempts')
-        .select('id,status,score,accuracy,correct_count,incorrect_count,unanswered_count,submitted_at,papers(subject,exam_name)')
+        .select('id,status,score,accuracy,correct_count,incorrect_count,unanswered_count,submitted_at,papers(subject,exam_name),attempt_answers(*, questions(*))')
         .eq('status','completed').order('submitted_at',{ascending:false}).limit(200),
       supabase.from('questions').select('id,paper_id,correct_option'),
       supabase.from('profiles').select('id,role,created_at'),
@@ -319,19 +320,97 @@ export const adminAnalyticsService = {
     const avgScore        = (attempts.reduce((s, a) => s + Number(a.score    ?? 0), 0) / totalAttempts).toFixed(1)
     const avgAccuracy     = (attempts.reduce((s, a) => s + Number(a.accuracy ?? 0), 0) / totalAttempts).toFixed(1)
 
-    // Subject breakdown
+    // Subject breakdown with nested Unit & Micro Topic hierarchy
     const subjMap = {}
     attempts.forEach(a => {
-      const s = a.papers?.subject ?? 'General'
-      if (!subjMap[s]) subjMap[s] = { correct: 0, wrong: 0, total: 0 }
-      subjMap[s].correct += a.correct_count   ?? 0
-      subjMap[s].wrong   += a.incorrect_count ?? 0
-      subjMap[s].total   += (a.correct_count + a.incorrect_count + a.unanswered_count)
+      const defaultSubj = a.papers?.subject ?? 'General Studies'
+
+      if (Array.isArray(a.attempt_answers) && a.attempt_answers.length > 0) {
+        a.attempt_answers.forEach(ans => {
+          const q = ans.questions || {}
+          const classification = classifyQuestion(q, a.papers)
+          const s = classification.subject || defaultSubj
+          const unit = classification.unit_name || `${s} - Core Unit`
+          const topic = classification.topic_name || 'General Concepts'
+
+          const isCorrect = ans.is_correct ?? (Boolean(ans.selected_option) && ans.selected_option === q.correct_option)
+          const isSkipped = !ans.selected_option
+          const isWrong = !isSkipped && !isCorrect
+
+          if (!subjMap[s]) subjMap[s] = { correct: 0, wrong: 0, skipped: 0, total: 0, units: {} }
+          subjMap[s].total += 1
+          if (isCorrect) subjMap[s].correct += 1
+          else if (isWrong) subjMap[s].wrong += 1
+          else subjMap[s].skipped += 1
+
+          if (!subjMap[s].units[unit]) {
+            subjMap[s].units[unit] = { correct: 0, wrong: 0, skipped: 0, total: 0, microTopics: {} }
+          }
+          subjMap[s].units[unit].total += 1
+          if (isCorrect) subjMap[s].units[unit].correct += 1
+          else if (isWrong) subjMap[s].units[unit].wrong += 1
+          else subjMap[s].units[unit].skipped += 1
+
+          if (!subjMap[s].units[unit].microTopics[topic]) {
+            subjMap[s].units[unit].microTopics[topic] = { correct: 0, wrong: 0, skipped: 0, total: 0 }
+          }
+          subjMap[s].units[unit].microTopics[topic].total += 1
+          if (isCorrect) subjMap[s].units[unit].microTopics[topic].correct += 1
+          else if (isWrong) subjMap[s].units[unit].microTopics[topic].wrong += 1
+          else subjMap[s].units[unit].microTopics[topic].skipped += 1
+        })
+      } else {
+        const s = defaultSubj
+        if (!subjMap[s]) subjMap[s] = { correct: 0, wrong: 0, skipped: 0, total: 0, units: {} }
+        const tot = (a.correct_count ?? 0) + (a.incorrect_count ?? 0) + (a.unanswered_count ?? 0)
+        subjMap[s].correct += a.correct_count   ?? 0
+        subjMap[s].wrong   += a.incorrect_count ?? 0
+        subjMap[s].skipped += a.unanswered_count ?? 0
+        subjMap[s].total   += tot
+
+        const defaultUnit = `${s} - Overall`
+        if (!subjMap[s].units[defaultUnit]) {
+          subjMap[s].units[defaultUnit] = {
+            correct: a.correct_count ?? 0,
+            wrong: a.incorrect_count ?? 0,
+            skipped: a.unanswered_count ?? 0,
+            total: tot,
+            microTopics: {
+              'Exam Questions': {
+                correct: a.correct_count ?? 0,
+                wrong: a.incorrect_count ?? 0,
+                skipped: a.unanswered_count ?? 0,
+                total: tot
+              }
+            }
+          }
+        }
+      }
     })
+
     const subjects = Object.entries(subjMap).map(([subject, v]) => ({
       subject,
       attempts: v.total,
       accuracy: v.total ? ((v.correct / v.total) * 100).toFixed(1) : '0',
+      correct: v.correct,
+      wrong: v.wrong,
+      skipped: v.skipped,
+      units: Object.entries(v.units).map(([unitName, u]) => ({
+        unit: unitName,
+        accuracy: u.total ? ((u.correct / u.total) * 100).toFixed(1) : '0',
+        attempted: u.total,
+        correct: u.correct,
+        wrong: u.wrong,
+        skipped: u.skipped,
+        microTopics: Object.entries(u.microTopics).map(([topicName, m]) => ({
+          topic: topicName,
+          accuracy: m.total ? ((m.correct / m.total) * 100).toFixed(1) : '0',
+          attempted: m.total,
+          correct: m.correct,
+          wrong: m.wrong,
+          skipped: m.skipped
+        })).sort((a, b) => b.attempted - a.attempted)
+      })).sort((a, b) => b.attempted - a.attempted)
     })).sort((a, b) => Number(b.accuracy) - Number(a.accuracy))
 
     // Daily trend (last 14 days)

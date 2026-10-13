@@ -227,6 +227,45 @@ export function UserDashboard() {
             )}
           </div>
 
+          {/* Interactive Syllabus Preview Card */}
+          <div className="bg-white rounded-2xl border border-surface-border shadow-subtle p-5">
+            <div className="flex items-center justify-between mb-3 pb-3 border-b border-surface-border">
+              <div className="flex items-center gap-2">
+                <BookMarked className="w-4 h-4 text-tnpsc-brand" />
+                <h2 className="text-sm font-bold text-body-text">Interactive Syllabus</h2>
+              </div>
+              <button
+                onClick={() => setShowSyllabus(true)}
+                className="text-xs text-tnpsc-brand font-bold hover:underline flex items-center gap-1"
+              >
+                Explore →
+              </button>
+            </div>
+            <div className="space-y-3">
+              {[
+                { name: 'General Science', pct: 78, isWeak: false },
+                { name: 'Geography', pct: 62, isWeak: false },
+                { name: 'Indian Polity', pct: 46, isWeak: true },
+                { name: 'History & Culture', pct: 31, isWeak: true },
+              ].map(u => (
+                <div key={u.name}>
+                  <div className="flex justify-between text-xs font-semibold mb-1">
+                    <span className="text-body-text">{u.name}</span>
+                    <span className={u.isWeak ? 'text-red-500 font-bold' : 'text-tnpsc-brand font-bold'}>{u.pct}%</span>
+                  </div>
+                  <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        u.isWeak ? 'bg-gradient-to-r from-amber-500 to-red-500' : 'bg-gradient-to-r from-tnpsc-brand to-purple-600'
+                      }`}
+                      style={{ width: `${u.pct}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* Govt Notifications */}
           <div className="bg-white rounded-2xl border border-surface-border shadow-subtle overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-surface-border">

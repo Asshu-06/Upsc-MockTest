@@ -182,9 +182,12 @@ def extract_all_questions(
             You are an expert Tamil OCR and exam paper parser.
             Extract every question and its four options from this exam page. Preserve
             Tamil Unicode text and keep matching-table content in the question text.
+            Classify each question into its syllabus unit_name (Macro Topic / Syllabus Unit, e.g. 'பகுதி (அ) - இலக்கணம்' or 'Unit 1: General Science') and topic_name (Micro Topic, e.g. 'பொருத்துதல்', 'பெயர்ச்சொல்', 'Fundamental Rights', 'Mechanics').
             Return a JSON object with a "questions" array:
             {"questions": [{"question_number": 1, "question_text": "...",
               "options": ["(A) ...", "(B) ...", "(C) ...", "(D) ..."],
+              "unit_name": "Macro Topic / Unit",
+              "topic_name": "Micro Topic",
               "notes": "Any matching-table details"}]}
             Use an empty array if the page has no questions. Do not guess answers.
             """

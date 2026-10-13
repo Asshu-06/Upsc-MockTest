@@ -140,6 +140,17 @@ export const questionService = {
         questionData.explanation_tamil = q.explanation_tamil
       }
 
+      // Add unit_name (Macro Topic) and topic_name (Micro Topic)
+      if (q.unit_name || q.unit) {
+        questionData.unit_name = q.unit_name || q.unit
+      }
+      if (q.topic_name || q.topic || q.micro_topic) {
+        questionData.topic_name = q.topic_name || q.topic || q.micro_topic
+      }
+      if (q.subject) {
+        questionData.subject = q.subject
+      }
+
       // Only add source_pdf and page_number if they exist (for backward compatibility)
       if (q.source_pdf) {
         questionData.source_pdf = q.source_pdf

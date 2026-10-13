@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { BarChart3, TrendingUp, Users, CheckCircle2, XCircle, Minus, Loader2 } from 'lucide-react'
+import {
+  BarChart3, TrendingUp, Users, CheckCircle2, XCircle, Minus, Loader2,
+  ChevronDown, ChevronRight, Layers, Tag, BookMarked
+} from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid, Legend,
@@ -11,6 +14,8 @@ export function AdminAnalyticsPage() {
   const { toast } = useApp()
   const [data, setData]     = useState(null)
   const [loading, setLoading] = useState(true)
+  const [expandedSubjects, setExpandedSubjects] = useState({})
+  const [expandedUnits, setExpandedUnits]       = useState({})
 
   useEffect(() => { load() }, [])
 
@@ -114,28 +119,143 @@ export function AdminAnalyticsPage() {
         </div>
       )}
 
-      {/* Subject breakdown */}
+      {/* Subject, Unit & Micro Topic Breakdown */}
       {data.subjects?.length > 0 && (
         <div className="bg-white rounded-2xl border border-surface-border shadow-subtle p-5">
-          <h3 className="text-sm font-bold text-body-text mb-4">Subject Accuracy Breakdown</h3>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="text-sm font-bold text-body-text flex items-center gap-2">
+                <Layers className="w-4 h-4 text-tnpsc-brand" />
+                Subject & Micro Topic Breakdown
+              </h3>
+              <p className="text-xs text-body-secondary mt-0.5">
+                Click any subject to drill down into Units (Macro Topics) and Micro Topics
+              </p>
+            </div>
+            <span className="text-[11px] font-medium text-tnpsc-brand bg-tnpsc-brand-light px-2.5 py-1 rounded-full">
+              Platform Topics
+            </span>
+          </div>
+
           <div className="space-y-3">
-            {data.subjects.map(s => (
-              <div key={s.subject}>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span className="font-medium text-body-text">{s.subject}</span>
-                  <span className="text-body-secondary">{s.accuracy}% · {s.attempts.toLocaleString()} attempts</span>
-                </div>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+            {data.subjects.map(s => {
+              const isSubjOpen = Boolean(expandedSubjects[s.subject])
+              const unitsCount = s.units?.length || 0
+
+              return (
+                <div key={s.subject} className="border border-surface-border rounded-xl overflow-hidden transition-all bg-white">
+                  {/* Subject Header (Clickable) */}
                   <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${s.accuracy}%`,
-                      background: Number(s.accuracy) >= 70 ? '#16a34a' : Number(s.accuracy) >= 50 ? '#635BFF' : '#dc2626',
-                    }}
-                  />
+                    onClick={() => setExpandedSubjects(prev => ({ ...prev, [s.subject]: !prev[s.subject] }))}
+                    className="flex items-center justify-between p-3.5 hover:bg-slate-50/80 cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-7 h-7 rounded-lg bg-tnpsc-brand-light text-tnpsc-brand flex items-center justify-center shrink-0">
+                        {isSubjOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-sm text-body-text">{s.subject}</span>
+                          {unitsCount > 0 && (
+                            <span className="text-[10px] font-semibold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                              {unitsCount} {unitsCount === 1 ? 'Unit' : 'Units'}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-body-secondary mt-0.5">
+                          {s.attempts.toLocaleString()} attempts
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right">
+                      <span className={`inline-block text-xs font-bold px-2 py-0.5 rounded-full ${
+                        Number(s.accuracy) >= 70 ? 'bg-emerald-50 text-emerald-700' :
+                        Number(s.accuracy) >= 50 ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'
+                      }`}>
+                        {s.accuracy}% Accuracy
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Subject Overall Bar */}
+                  <div className="px-3.5 pb-3">
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${s.accuracy}%`,
+                          background: Number(s.accuracy) >= 70 ? '#16a34a' : Number(s.accuracy) >= 50 ? '#635BFF' : '#dc2626',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Expanded Units & Micro Topics */}
+                  {isSubjOpen && (
+                    <div className="bg-slate-50/60 p-3.5 border-t border-surface-border space-y-2.5 animate-fade-in">
+                      {unitsCount === 0 ? (
+                        <p className="text-xs text-body-secondary italic py-1">No detailed micro-topic data available for this subject.</p>
+                      ) : (
+                        s.units.map(u => {
+                          const unitKey = `${s.subject}-${u.unit}`
+                          const isUnitOpen = expandedUnits[unitKey] !== false
+                          const microCount = u.microTopics?.length || 0
+
+                          return (
+                            <div key={unitKey} className="bg-white rounded-lg border border-surface-border p-3 shadow-2xs">
+                              {/* Unit (Macro Topic) Row */}
+                              <div
+                                onClick={() => setExpandedUnits(prev => ({ ...prev, [unitKey]: !isUnitOpen }))}
+                                className="flex items-center justify-between cursor-pointer hover:opacity-85 select-none"
+                              >
+                                <div className="flex items-center gap-2">
+                                  {isUnitOpen ? <ChevronDown className="w-3.5 h-3.5 text-slate-400" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-400" />}
+                                  <BookMarked className="w-3.5 h-3.5 text-tnpsc-brand shrink-0" />
+                                  <span className="text-xs font-bold text-body-text">{u.unit}</span>
+                                  <span className="text-[10px] text-body-secondary">({u.attempted} qs)</span>
+                                </div>
+                                <span className={`text-[11px] font-bold ${
+                                  Number(u.accuracy) >= 70 ? 'text-emerald-700' :
+                                  Number(u.accuracy) >= 50 ? 'text-blue-700' : 'text-red-700'
+                                }`}>
+                                  {u.accuracy}%
+                                </span>
+                              </div>
+
+                              {/* Nested Micro Topics */}
+                              {isUnitOpen && (
+                                <div className="mt-2.5 pt-2 border-t border-slate-100 space-y-2 pl-5">
+                                  {u.microTopics?.map(m => (
+                                    <div key={m.topic} className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs py-1">
+                                      <div className="flex items-center gap-1.5">
+                                        <Tag className="w-3 h-3 text-slate-400 shrink-0" />
+                                        <span className="font-medium text-slate-700">{m.topic}</span>
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                        <span className="text-[11px] text-body-secondary">
+                                          {m.correct}/{m.attempted} correct
+                                        </span>
+                                        <span className={`text-[11px] font-semibold px-2 py-0.5 rounded ${
+                                          Number(m.accuracy) >= 70 ? 'bg-emerald-50 text-emerald-700' :
+                                          Number(m.accuracy) >= 50 ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'
+                                        }`}>
+                                          {m.accuracy}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })
+                      )}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
