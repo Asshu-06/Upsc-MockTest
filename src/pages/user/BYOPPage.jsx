@@ -861,7 +861,7 @@ export function BYOPPage() {
       )
 
       if (!hasSelectableText) {
-        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
+        throw new Error('This PDF is a scanned image document with no selectable digital text. The offline local parser requires selectable text. For scanned PDFs, please use a selectable-text PDF or an OCR tool.')
       }
 
       // Step 3: Parse MCQ questions from extracted text
