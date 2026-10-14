@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase'
+import { supabase } from '../lib/supabase.js'
 
 export const questionService = {
   async getQuestionsByPaperId(paperId, isExamMode = false) {
@@ -6,7 +6,7 @@ export const questionService = {
     
     // In exam mode, do not expose correct_option or explanation to client network responses
     if (isExamMode) {
-      selectFields = 'id, paper_id, question_number, question_text, question_text_tamil, option_a, option_b, option_c, option_d, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil'
+      selectFields = 'id, paper_id, question_number, question_text, option_a, option_b, option_c, option_d, question_text_tamil, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil'
     }
 
     const { data, error } = await supabase
@@ -27,6 +27,39 @@ export const questionService = {
 
     if (error) throw error
     return count || 0
+  },
+
+  async queryQuestionsByCriteria({ tags, unitId, unitCode, difficultyLevel, partCode, groupName, limit = 100 } = {}) {
+    let query = supabase.from('questions').select('*')
+
+    if (groupName) {
+      query = query.eq('group_name', groupName)
+    }
+    if (unitId) {
+      query = query.eq('unit_id', unitId)
+    }
+    if (unitCode) {
+      query = query.eq('unit_code', unitCode)
+    }
+    if (partCode) {
+      query = query.eq('part_code', partCode)
+    }
+    if (difficultyLevel) {
+      query = query.eq('difficulty_level', difficultyLevel)
+    }
+    if (tags && Array.isArray(tags) && tags.length > 0) {
+      query = query.contains('tags', tags)
+    }
+    if (limit) {
+      query = query.limit(limit)
+    }
+
+    const { data, error } = await query
+    if (error) {
+      console.warn('[questionService] queryQuestionsByCriteria error:', error)
+      return []
+    }
+    return data || []
   },
 
   async createQuestion(questionData) {
@@ -78,6 +111,16 @@ export const questionService = {
       throw new Error('No questions provided for import.')
     }
 
+    // Helper: Sanitize database text - remove ONLY null bytes (U+0000)
+    const sanitizeDatabaseText = (value) => {
+      if (typeof value !== 'string') return value
+      const cleaned = value.replace(/\u0000/g, '')
+      if (cleaned !== value) {
+        console.warn('[UNICODE-TRACE][DATABASE-SANITIZE] Removed null bytes from field')
+      }
+      return cleaned
+    }
+
     // 1. If replaceExisting is true, delete existing questions for paper_id
     if (replaceExisting) {
       const { error: delErr } = await supabase
@@ -89,7 +132,7 @@ export const questionService = {
     }
 
     // 2. Map frontend fields to actual Supabase database schema
-    const formattedList = questionsList.map((q) => {
+    const formattedList = questionsList.map((q, idx) => {
       const opt = q.correct_option || q.marked_answer ? String(q.correct_option || q.marked_answer).toUpperCase().trim() : null
       const validOpt = ['A', 'B', 'C', 'D'].includes(opt) ? opt : null
 
@@ -108,58 +151,35 @@ export const questionService = {
         })
       }
 
-      const questionData = {
+      // CRITICAL: Sanitize all text fields to remove null bytes before database insert
+      const sanitized = {
         paper_id: paperId,
         question_number: parseInt(q.question_number, 10),
-        question_text: q.question_text || '',
-        option_a: optA,
-        option_b: optB,
-        option_c: optC,
-        option_d: optD,
+        question_text: sanitizeDatabaseText(q.question_text || ''),
+        option_a: sanitizeDatabaseText(optA),
+        option_b: sanitizeDatabaseText(optB),
+        option_c: sanitizeDatabaseText(optC),
+        option_d: sanitizeDatabaseText(optD),
         correct_option: validOpt,
-        explanation: q.explanation || q.extraction_notes || null
+        explanation: sanitizeDatabaseText(q.explanation || q.extraction_notes || null),
+        question_text_tamil: sanitizeDatabaseText(q.question_text_tamil || q.tamil_question || null),
+        option_a_tamil: sanitizeDatabaseText(q.option_a_tamil || null),
+        option_b_tamil: sanitizeDatabaseText(q.option_b_tamil || null),
+        option_c_tamil: sanitizeDatabaseText(q.option_c_tamil || null),
+        option_d_tamil: sanitizeDatabaseText(q.option_d_tamil || null),
+        explanation_tamil: sanitizeDatabaseText(q.explanation_tamil || null)
       }
 
-      // Add Tamil language fields if they exist
-      if (q.question_text_tamil) {
-        questionData.question_text_tamil = q.question_text_tamil
-      }
-      if (q.option_a_tamil) {
-        questionData.option_a_tamil = q.option_a_tamil
-      }
-      if (q.option_b_tamil) {
-        questionData.option_b_tamil = q.option_b_tamil
-      }
-      if (q.option_c_tamil) {
-        questionData.option_c_tamil = q.option_c_tamil
-      }
-      if (q.option_d_tamil) {
-        questionData.option_d_tamil = q.option_d_tamil
-      }
-      if (q.explanation_tamil) {
-        questionData.explanation_tamil = q.explanation_tamil
+      // Log null byte removal for first few questions
+      if (idx < 3) {
+        const hadNullBytes = [q.question_text, optA, optB, optC, optD, q.explanation]
+          .filter(v => v && typeof v === 'string' && v.includes('\u0000')).length
+        if (hadNullBytes > 0) {
+          console.log(`[UNICODE-TRACE][DATABASE-PAYLOAD] Q${sanitized.question_number} nullByteFields=${hadNullBytes} (sanitized)`)
+        }
       }
 
-      // Add unit_name (Macro Topic) and topic_name (Micro Topic)
-      if (q.unit_name || q.unit) {
-        questionData.unit_name = q.unit_name || q.unit
-      }
-      if (q.topic_name || q.topic || q.micro_topic) {
-        questionData.topic_name = q.topic_name || q.topic || q.micro_topic
-      }
-      if (q.subject) {
-        questionData.subject = q.subject
-      }
-
-      // Only add source_pdf and page_number if they exist (for backward compatibility)
-      if (q.source_pdf) {
-        questionData.source_pdf = q.source_pdf
-      }
-      if (q.page_number) {
-        questionData.page_number = q.page_number
-      }
-
-      return questionData
+      return sanitized
     })
 
     // Deduplicate formatted list by question_number to ensure PostgreSQL ON CONFLICT DO UPDATE never encounters duplicate keys in a single batch
@@ -174,6 +194,9 @@ export const questionService = {
     // 3. Batch insert in chunks of 25 items to handle large question sets safely
     const BATCH_SIZE = 25
     const insertedRecords = []
+    let totalInserted = 0
+
+    console.log(`[questionService] Starting batch insert: ${uniqueList.length} questions, paperId=${paperId}`)
 
     for (let i = 0; i < uniqueList.length; i += BATCH_SIZE) {
       const batch = uniqueList.slice(i, i + BATCH_SIZE)
@@ -184,12 +207,26 @@ export const questionService = {
         .select()
 
       if (error) {
-        console.error(`Batch insert error at index ${i}:`, error)
+        console.error(`[questionService] Batch insert error at index ${i}:`, {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        })
         throw new Error(`Database import failed at question batch (${i + 1}-${i + batch.length}): ${error.message}`)
       }
 
-      if (data) insertedRecords.push(...data)
+      if (data) {
+        insertedRecords.push(...data)
+        totalInserted += data.length
+      }
     }
+
+    console.log(`[questionService] QUESTIONS INSERT SUCCESS:`, {
+      paperId,
+      insertedCount: totalInserted,
+      totalBatches: Math.ceil(uniqueList.length / BATCH_SIZE)
+    })
 
     // 4. Update total_questions count on papers table
     await this.updatePaperTotalQuestions(paperId)
@@ -198,14 +235,12 @@ export const questionService = {
   },
 
   async saveExtractedDocument(docMetadata) {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    if (authError) throw authError
-    if (!user) throw new Error('Sign in before saving extracted questions.')
+    const { data: { user } } = await supabase.auth.getUser()
 
     const { data, error } = await supabase
       .from('documents')
       .insert([{
-        user_id: user.id,
+        user_id: user?.id || null,
         paper_id: docMetadata.paperId || null,
         file_name: docMetadata.fileName,
         storage_path: docMetadata.storagePath || null,
@@ -217,46 +252,12 @@ export const questionService = {
       .select()
       .single()
 
-    if (error) throw error
-    return data
-  },
-
-  async getSavedExtractedDocuments(limit = 50) {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    if (authError) throw authError
-    if (!user) throw new Error('Sign in to view saved extracted questions.')
-
-    const { data, error } = await supabase
-      .from('documents')
-      .select('id, file_name, total_pages, total_questions, created_at')
-      .eq('user_id', user.id)
-      .eq('processing_status', 'completed')
-      .order('created_at', { ascending: false })
-      .limit(limit)
-
-    if (error) throw error
-    return data || []
-  },
-
-  async getSavedExtractedDocument(documentId) {
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
-    if (authError) throw authError
-    if (!user) throw new Error('Sign in to view saved extracted questions.')
-
-    const { data, error } = await supabase
-      .from('documents')
-      .select('id, file_name, extracted_summary')
-      .eq('id', documentId)
-      .eq('user_id', user.id)
-      .eq('processing_status', 'completed')
-      .single()
-
-    if (error) throw error
-    const questions = data.extracted_summary?.questions
-    if (!Array.isArray(questions)) {
-      throw new Error('This saved record does not contain a downloadable JSON question list.')
+    if (error) {
+      console.warn('Document record insert note:', error)
+      return null
     }
-    return { ...data, questions }
+
+    return data
   },
 
   async saveExtractedQuestions(documentId, paperId, extractedQuestions) {

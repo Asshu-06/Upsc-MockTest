@@ -3,13 +3,16 @@ import { useNavigate } from 'react-router-dom'
 import {
   Upload, FileText, Loader2, CheckCircle2, XCircle, AlertCircle,
   RefreshCw, Eye, Trash2, Plus, Clock, ChevronDown, ChevronRight,
-  Layers, Zap, BookOpen, AlertTriangle, RotateCcw, X, Save, Play,
+  Layers, Zap, BookOpen, AlertTriangle, RotateCcw, X, Save, Play, Sparkles,
 } from 'lucide-react'
 import { useAuth } from '../../hooks/useAuth'
 import { useApp } from '../../contexts/AppContext'
 import { supabase } from '../../lib/supabase'
 import { byopService } from '../../services/tnpscService'
-import { extractQuestionsFromPdf } from '../../services/pdfExtractionPipeline'
+import { extractPdfText } from '../../services/pdfTextExtractor'
+import { parseMcqQuestions } from '../../services/mcqParser'
+import { extractQuestionsWithAi, blobToBase64, fetchAvailableGeminiModels } from '../../services/aiPdfService'
+import { apiKeyService } from '../../services/apiKeyService'
 import { questionService } from '../../services/questionService'
 import { paperService } from '../../services/paperService'
 import { formatDate } from '../../lib/utils'
@@ -22,6 +25,44 @@ const STATUS_CONFIG = {
   review_required: { label: 'Review Required',  color: 'bg-orange-100 text-orange-700',  icon: AlertCircle },
   ready:           { label: 'Ready',            color: 'bg-green-100 text-green-700',    icon: CheckCircle2 },
   failed:          { label: 'Failed',           color: 'bg-red-100 text-red-700',        icon: XCircle },
+}
+
+// ─── Unicode Sanitizer Utility ───────────────────────────────────────────────
+function sanitizeUnicode(value) {
+  if (typeof value !== 'string') {
+    if (Array.isArray(value)) return value.map(sanitizeUnicode)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [k, sanitizeUnicode(v)])
+      )
+    }
+    return value
+  }
+
+  // Remove null bytes and unpaired surrogates (PostgreSQL rejects these)
+  let result = ''
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i)
+
+    // Skip null bytes (U+0000)
+    if (code === 0x0000) continue
+
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      // High surrogate - check if followed by low surrogate
+      const next = value.charCodeAt(i + 1)
+      if (next >= 0xDC00 && next <= 0xDFFF) {
+        result += value[i] + value[i + 1]
+        i++
+      } else {
+        result += '\uFFFD'
+      }
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      result += '\uFFFD'
+    } else {
+      result += value[i]
+    }
+  }
+  return result
 }
 
 // ─── Batch progress bar ────────────────────────────────────────────────────────
@@ -61,7 +102,7 @@ function BatchProgress({ info }) {
 
       {totalPages > 1 && (
         <p className="text-[11px] text-blue-600 text-center">
-          Processing page {currentPage ?? 0} of {totalPages} with the server-side extractor
+          Processing page {currentPage ?? 0} of {totalPages} using local PDF.js parser
         </p>
       )}
     </div>
@@ -187,8 +228,8 @@ function QuestionsPanel({ questions, onSave, saving }) {
                     </label>
                     <textarea
                       rows={2}
-                      value={q.tamil_question ?? ''}
-                      onChange={e => editQuestion(idx, 'tamil_question', e.target.value)}
+                      value={q.question_text || q.tamil_question || ''}
+                      onChange={e => { editQuestion(idx, 'question_text', e.target.value); editQuestion(idx, 'tamil_question', e.target.value) }}
                       className="w-full border border-surface-border rounded-lg px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-tnpsc-brand resize-none"
                       placeholder="Tamil text…"
                     />
@@ -220,8 +261,8 @@ function QuestionsPanel({ questions, onSave, saving }) {
                         </label>
                         <input
                           type="text"
-                          value={q[`option_${opt.toLowerCase()}`] ?? ''}
-                          onChange={e => editQuestion(idx, `option_${opt.toLowerCase()}`, e.target.value)}
+                          value={q[`option_${opt.toLowerCase()}`] || q.options?.[opt] || ''}
+                          onChange={e => { editQuestion(idx, `option_${opt.toLowerCase()}`, e.target.value); if (q.options) q.options[opt] = e.target.value }}
                           className={`w-full border rounded-lg px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-tnpsc-brand ${
                             q.correct_option === opt
                               ? 'border-emerald-400 bg-emerald-50'
@@ -275,6 +316,7 @@ function QuestionsPanel({ questions, onSave, saving }) {
 }
 
 // ─── Attempt button: looks up the paper created from this upload ──────────────
+// ─── Attempt button: looks up or auto-creates the paper created from this upload ──────────────
 function AttemptButton({ paperId, userId }) {
   const [loading, setLoading] = useState(false)
   const { toast } = useApp()
@@ -283,23 +325,42 @@ function AttemptButton({ paperId, userId }) {
   async function handleAttempt() {
     setLoading(true)
     try {
-      const { data: record } = await supabase
+      const { data: record, error: recErr } = await supabase
         .from('uploaded_papers')
-        .select('notes, title')
+        .select('*')
         .eq('id', paperId)
         .maybeSingle()
 
-      // Try regex from notes first: '... paper "uuid".'
-      const match = record?.notes?.match(/"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/)
-      if (match?.[1]) {
-        navigate(`/exam/${match[1]}`)
+      if (recErr) throw recErr
+      if (!record) {
+        toast.error('Paper record not found.')
         return
       }
 
-      // Fallback: find the draft paper by created_by + title
+      // 1. Try regex from notes first: '... paper "uuid".'
+      const match = record?.notes?.match(/"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/)
+      const targetPaperId = match?.[1]
+
+      if (targetPaperId) {
+        const { data: existingPaper } = await supabase
+          .from('papers')
+          .select('id, status')
+          .eq('id', targetPaperId)
+          .maybeSingle()
+
+        if (existingPaper?.id) {
+          if (existingPaper.status !== 'published') {
+            await supabase.from('papers').update({ status: 'published' }).eq('id', existingPaper.id)
+          }
+          navigate(`/exam/${existingPaper.id}`)
+          return
+        }
+      }
+
+      // 2. Fallback: find the paper by created_by + title + exam_name === 'Custom Upload'
       const { data: papers } = await supabase
         .from('papers')
-        .select('id')
+        .select('id, status')
         .eq('created_by', userId)
         .ilike('title', `%${record?.title ?? ''}%`)
         .eq('exam_name', 'Custom Upload')
@@ -307,12 +368,110 @@ function AttemptButton({ paperId, userId }) {
         .limit(1)
 
       if (papers?.[0]?.id) {
+        if (papers[0].status !== 'published') {
+          await supabase.from('papers').update({ status: 'published' }).eq('id', papers[0].id)
+        }
+        await supabase
+          .from('uploaded_papers')
+          .update({
+            notes: `${record?.notes || ''} paper "${papers[0].id}".`.trim()
+          })
+          .eq('id', paperId)
+
         navigate(`/exam/${papers[0].id}`)
         return
       }
 
-      toast.error('Could not find the linked paper. Try navigating to Papers list.')
+      // 3. Fallback: Self-healing creation from record.questions_json
+      let rawQuestions = []
+      if (Array.isArray(record?.questions_json)) {
+        rawQuestions = record.questions_json
+      } else if (typeof record?.questions_json === 'string') {
+        try { rawQuestions = JSON.parse(record.questions_json) } catch (e) { rawQuestions = [] }
+      }
+
+      if (rawQuestions && rawQuestions.length > 0) {
+        toast.info('Preparing exam environment...')
+
+        const newPaper = await paperService.createPaper({
+          title: record.title || 'Custom Uploaded Paper',
+          exam_name: 'Custom Upload',
+          exam_type: 'Custom',
+          year: new Date().getFullYear(),
+          subject: 'General',
+          description: `BYOP upload: ${record.file_name || record.title}`,
+          duration_minutes: Math.max(30, Math.round(rawQuestions.length * 1.5)),
+          total_questions: rawQuestions.length,
+          status: 'published',
+          created_by: userId,
+        })
+
+        const toSave = rawQuestions
+          .filter(q => q.question_text?.trim() || q.tamil_question?.trim() || q.english_question?.trim())
+          .map((q, i) => {
+            const eng = (q.question_text_english || q.english_question || '').trim()
+            const tam = (q.question_text_tamil || q.tamil_question || '').trim()
+            let combined = (q.question_text || '').trim()
+
+            if (eng && tam) {
+              if (!combined.includes('தமிழ்:')) {
+                combined = `${eng}\nதமிழ்: ${tam}`
+              }
+            } else if (!combined) {
+              combined = eng && tam ? `${eng}\nதமிழ்: ${tam}` : (eng || tam || `Question ${i + 1}`)
+            }
+
+            const formatOpt = (engOpt, tamOpt) => {
+              const e = (engOpt || '').trim()
+              const t = (tamOpt || '').trim()
+              if (!t || t === e) return e || t
+              if (!e) return t
+              if (e.includes(' / ')) return e
+              return `${e} / ${t}`
+            }
+
+            return {
+              question_number: parseInt(String(q.question_number), 10) || i + 1,
+              question_text: combined,
+              question_text_tamil: tam || null,
+              option_a: formatOpt(q.option_a || q.options?.A || 'Option A', q.option_a_tamil),
+              option_b: formatOpt(q.option_b || q.options?.B || 'Option B', q.option_b_tamil),
+              option_c: formatOpt(q.option_c || q.options?.C || 'Option C', q.option_c_tamil),
+              option_d: formatOpt(q.option_d || q.options?.D || 'Option D', q.option_d_tamil),
+              option_a_tamil: q.option_a_tamil || null,
+              option_b_tamil: q.option_b_tamil || null,
+              option_c_tamil: q.option_c_tamil || null,
+              option_d_tamil: q.option_d_tamil || null,
+              correct_option: ['A','B','C','D'].includes(q.correct_option || q.correct_answer)
+                ? (q.correct_option || q.correct_answer)
+                : null,
+              explanation: q.explanation || null,
+              explanation_tamil: q.explanation_tamil || null,
+            }
+          })
+
+        if (toSave.length > 0) {
+          await questionService.saveQuestionsToSupabase(newPaper.id, toSave, false)
+        }
+
+        const notesMsg = `${toSave.length} questions saved to paper "${newPaper.id}".`
+        await supabase
+          .from('uploaded_papers')
+          .update({
+            notes: notesMsg,
+            processing_status: 'ready',
+            extracted_count: toSave.length,
+          })
+          .eq('id', paperId)
+
+        toast.success('Exam ready! Starting test...')
+        navigate(`/exam/${newPaper.id}`)
+        return
+      }
+
+      toast.error('No extracted questions found in this paper. Please click "Process" to extract questions first.')
     } catch (err) {
+      console.error('[AttemptButton] Error launching test:', err)
       toast.error('Error: ' + err.message)
     } finally {
       setLoading(false)
@@ -329,7 +488,7 @@ function AttemptButton({ paperId, userId }) {
         ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
         : <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20"><path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z"/></svg>
       }
-      Attempt Test
+      {loading ? 'Preparing…' : 'Attempt Test'}
     </button>
   )
 }
@@ -337,7 +496,8 @@ function AttemptButton({ paperId, userId }) {
 // ─── Main page ─────────────────────────────────────────────────────────────────
 export function BYOPPage() {
   const { user } = useAuth()
-  const { toast } = useApp()
+  const { toast, hasGeminiApiKey, geminiApiKey } = useApp()
+  const navigate = useNavigate()
   const fileRef   = useRef(null)
 
   const [papers, setPapers]   = useState([])
@@ -349,7 +509,34 @@ export function BYOPPage() {
   const [progressInfo, setProgress] = useState(null)
   const [result, setResult]         = useState(null)   // local parser result
   const [showReview, setShowReview] = useState(false)
+  const [reviewPaperId, setReviewPaperId] = useState(null)
   const [saving, setSaving]         = useState(false)
+  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash')
+  const [modelsList, setModelsList] = useState([
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (Recommended)' },
+    { id: 'gemini-flash-latest', name: 'Gemini Flash Latest' },
+    { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' },
+    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
+  ])
+
+  useEffect(() => {
+    async function loadModels() {
+      const apiKey = geminiApiKey || apiKeyService.getUserApiKey()
+      if (!apiKey) return
+      try {
+        const list = await fetchAvailableGeminiModels(apiKey)
+        if (list && list.length > 0) {
+          setModelsList(list)
+          if (!list.some(m => m.id === selectedModel)) {
+            setSelectedModel(list[0].id)
+          }
+        }
+      } catch (e) {
+        console.warn('Error loading models in BYOP:', e)
+      }
+    }
+    loadModels()
+  }, [geminiApiKey])
 
   useEffect(() => { if (user?.id) fetchPapers() }, [user?.id])
 
@@ -392,7 +579,7 @@ export function BYOPPage() {
   }
 
   // ── Process (run full pipeline) ────────────────────────────────────────────
-  async function handleProcess(paper) {
+  async function handleProcess(paper, mode = 'ai') {
     // Generate unique processing job ID
     const processingJobId = `${paper.id}-${Date.now()}`
     
@@ -408,6 +595,7 @@ export function BYOPPage() {
     setProgress(null)
     setResult(null)
     setShowReview(false)
+    setReviewPaperId(null)
 
     // Mark processing in DB
     await byopService.update(paper.id, user.id, {
@@ -422,61 +610,302 @@ export function BYOPPage() {
     try {
       const signedUrl  = await byopService.getSignedUrl(paper.storage_path)
 
-      // Pass the signed storage URL so the serverless function downloads the PDF directly.
+      // Step 1: Fetch PDF blob
+      console.log('[BYOP] Fetching PDF from storage...')
+      const response = await fetch(signedUrl)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`)
+      }
+      const pdfBlob = await response.blob()
+      
+      // Check if AI Vision extraction is requested (Best for Tamil / Scanned / Handwritten)
+      if (mode === 'ai') {
+        const effectiveKey = geminiApiKey || apiKeyService.getUserApiKey()
+        if (!effectiveKey) {
+          toast.error('Gemini API key is required for AI Vision extraction. Please configure your key in Profile & Settings.')
+          setActiveId(null)
+          setProgress(null)
+          await byopService.update(paper.id, user.id, {
+            processing_status: paper.processing_status || 'uploaded',
+          })
+          setPapers(prev => prev.map(p => p.id === paper.id
+            ? { ...p, processing_status: paper.processing_status || 'uploaded' }
+            : p
+          ))
+          navigate('/profile#api-key')
+          return
+        }
+
+        try {
+          setProgress({
+            stage: 'extracting',
+            currentPage: 1,
+            totalPages: 1,
+            pagesProcessed: 1,
+            questionsFound: 0,
+            statusText: 'Analyzing PDF with Gemini AI Vision...'
+          })
+
+          const base64Data = await blobToBase64(pdfBlob)
+          const aiQuestions = await extractQuestionsWithAi(
+            base64Data,
+            selectedModel,
+            (statusText) => setProgress({ stage: 'extracting', currentPage: 1, totalPages: 1, pagesProcessed: 1, questionsFound: 0, statusText }),
+            effectiveKey
+          )
+
+          const questions = aiQuestions.map((q, idx) => ({
+            ...q,
+            question_number: q.question_number || idx + 1,
+            parser_status: 'ready',
+            isValid: true,
+            extraction_status: 'complete',
+            source_page: 1,
+          }))
+
+          setResult({
+            processingJobId,
+            fileName: paper.file_name,
+            questions,
+            totalQuestions: questions.length,
+            totalPages: 1,
+            processedPages: 1,
+          })
+
+          // Auto-create playable paper in central papers table so Attempt Test works immediately
+          let newPaperId = null
+          try {
+            const newPaper = await paperService.createPaper({
+              title:            paper.title || 'Custom Uploaded Paper',
+              exam_name:        'Custom Upload',
+              exam_type:        'Custom',
+              year:             new Date().getFullYear(),
+              subject:          'General',
+              description:      `BYOP upload: ${paper.file_name}`,
+              duration_minutes: Math.max(30, Math.round(questions.length * 1.5)),
+              total_questions:  questions.length,
+              status:           'published',
+              created_by:       user.id,
+            })
+            newPaperId = newPaper.id
+
+            const toSave = questions.map((q, i) => {
+              const eng = (q.question_text_english || q.english_question || '').trim()
+              const tam = (q.question_text_tamil || q.tamil_question || '').trim()
+              let combined = (q.question_text || '').trim()
+
+              if (eng && tam) {
+                if (!combined.includes('தமிழ்:')) {
+                  combined = `${eng}\nதமிழ்: ${tam}`
+                }
+              } else if (!combined) {
+                combined = eng && tam ? `${eng}\nதமிழ்: ${tam}` : (eng || tam || `Question ${i + 1}`)
+              }
+
+              const formatOpt = (engOpt, tamOpt) => {
+                const e = (engOpt || '').trim()
+                const t = (tamOpt || '').trim()
+                if (!t || t === e) return e || t
+                if (!e) return t
+                if (e.includes(' / ')) return e
+                return `${e} / ${t}`
+              }
+
+              return {
+                question_number: parseInt(String(q.question_number), 10) || i + 1,
+                question_text: combined,
+                question_text_tamil: tam || null,
+                option_a: formatOpt(q.option_a || q.options?.A || 'Option A', q.option_a_tamil),
+                option_b: formatOpt(q.option_b || q.options?.B || 'Option B', q.option_b_tamil),
+                option_c: formatOpt(q.option_c || q.options?.C || 'Option C', q.option_c_tamil),
+                option_d: formatOpt(q.option_d || q.options?.D || 'Option D', q.option_d_tamil),
+                option_a_tamil: q.option_a_tamil || null,
+                option_b_tamil: q.option_b_tamil || null,
+                option_c_tamil: q.option_c_tamil || null,
+                option_d_tamil: q.option_d_tamil || null,
+                correct_option: ['A','B','C','D'].includes(q.correct_option || q.correct_answer)
+                  ? (q.correct_option || q.correct_answer)
+                  : null,
+                explanation: q.explanation || null,
+                explanation_tamil: q.explanation_tamil || null,
+              }
+            })
+
+            await questionService.saveQuestionsToSupabase(newPaper.id, toSave, false)
+          } catch (autoCreateErr) {
+            console.warn('[BYOP] Auto-creating paper during AI process encountered issue:', autoCreateErr)
+          }
+
+          const notesMsg = newPaperId
+            ? `${questions.length} questions extracted and saved to paper "${newPaperId}".`
+            : `${questions.length} questions extracted using AI Vision.`
+
+          const storagePayload = sanitizeUnicode({
+            processing_status: 'ready',
+            total_pages: 1,
+            processed_pages: 1,
+            extracted_count: questions.length,
+            questions_json: sanitizeUnicode(questions),
+            batch_progress_json: [],
+            notes: notesMsg,
+          })
+
+          await byopService.update(paper.id, user.id, storagePayload)
+
+          setPapers(prev => prev.map(p => p.id === paper.id
+            ? {
+                ...p,
+                processing_status: 'ready',
+                extracted_count: questions.length,
+                notes: notesMsg,
+                questions_json: questions
+              }
+            : p
+          ))
+
+          setReviewPaperId(paper.id)
+          setShowReview(true)
+          toast.success(`AI extracted ${questions.length} questions accurately! Paper is ready for test.`)
+          return
+        } catch (aiErr) {
+          if (aiErr.message === 'NO_API_KEY_CONFIGURED' || aiErr.code === 'NO_API_KEY_CONFIGURED') {
+            toast.error('Gemini API key is not configured. Please add your key in Profile & Settings.')
+            setActiveId(null)
+            setProgress(null)
+            await byopService.update(paper.id, user.id, {
+              processing_status: 'failed',
+              notes: 'Gemini API key missing. Please configure your API key in Settings.',
+            })
+            setPapers(prev => prev.map(p => p.id === paper.id
+              ? { ...p, processing_status: 'failed', notes: 'Gemini API key missing.' }
+              : p
+            ))
+            navigate('/profile#api-key')
+            return
+          }
+          console.warn('[BYOP] AI Vision extraction encountered issue. Cascading to Local PDF Engine...', aiErr.message)
+          toast.info(`AI Vision blocked/busy (${aiErr.message?.includes('RECITATION') ? 'Recitation safety' : 'AI busy'}). Cascading to Local PDF Engine...`)
+          // Fall through to Step 2 (PDF.js local text extraction)
+        }
+      }
+      
+      console.log('[BYOP] PDF Blob fetched:', {
+        processingJobId,
+        fileName: paper.file_name,
+        blobSize: pdfBlob.size,
+        blobType: pdfBlob.type
+      })
+
+      // Step 2: Extract text from PDF using PDF.js
       setProgress({ 
         stage: 'extracting', 
         currentPage: 0, 
         totalPages: 0, 
         pagesProcessed: 0,
         questionsFound: 0,
-        statusText: 'Sending PDF to the server-side extractor...'
+        statusText: 'Extracting text from PDF...'
       })
       
       let extractionResult
       try {
-        console.log('[BYOP] Sending the signed PDF URL to the serverless extractor...')
-        extractionResult = await extractQuestionsFromPdf(signedUrl, {
-          jobId: processingJobId,
-          fileName: paper.file_name,
+        console.log('[BYOP] Starting PDF.js extraction...')
+        extractionResult = await extractPdfText(pdfBlob, (current, total) => {
+          console.log(`[BYOP] Extraction progress: page ${current}/${total} (job: ${processingJobId})`)
+          setProgress({
+            stage: 'extracting',
+            currentPage: current,
+            totalPages: total,
+            pagesProcessed: current,
+            questionsFound: 0,
+            statusText: `Extracting text from page ${current} of ${total}...`
+          })
         })
         
-        console.log('[BYOP] Server-side extraction complete:', {
+        console.log('[BYOP] PDF.js extraction complete:', {
           processingJobId,
           fileName: paper.file_name,
           totalPages: extractionResult.totalPages,
-          extractedTextLength: extractionResult.fullText.length,
+          hasSelectableText: extractionResult.hasSelectableText,
+          extractedTextLength: extractionResult.pages?.reduce((sum, p) => 
+            sum + p.items.reduce((s, i) => s + (i.text?.length || 0), 0), 0)
         })
       } catch (err) {
-        console.error('[BYOP] Server-side extraction error:', {
+        console.error('[BYOP] PDF.js extraction error:', {
           processingJobId,
           fileName: paper.file_name,
           error: err.message,
           stack: err.stack
         })
         const errorMsg = err.message || 'Unknown PDF extraction error'
-        throw new Error(`PDF question extraction failed: ${errorMsg}`)
+        throw new Error(`PDF text extraction failed: ${errorMsg}`)
       }
 
+      // Check if PDF has selectable text
+      if (!extractionResult.pages || extractionResult.pages.length === 0) {
+        throw new Error('PDF contains no pages or failed to extract page data.')
+      }
+
+      // Verify page count
       console.log('[BYOP] PDF IDENTITY CHECK:', {
         processingJobId,
         fileName: paper.file_name,
         expectedFileName: paper.file_name,
         extractedPages: extractionResult.totalPages,
+        hasSelectableText: extractionResult.hasSelectableText
       })
 
-      // Step 3: Use the same normalized questions that were written to JSON
+      // Check if any page has text items with content
+      const hasSelectableText = extractionResult.pages.some(page => 
+        page.items && page.items.length > 0 && 
+        page.items.some(item => item.text && item.text.trim().length > 0)
+      )
+
+      if (!hasSelectableText) {
+        throw new Error('PDF contains no selectable text. Please upload a selectable-text PDF.')
+      }
+
+      // Step 3: Parse MCQ questions from extracted text
+      console.log('[BYOP] Starting MCQ parsing...')
       setProgress({ 
         stage: 'parsing', 
-        currentPage: extractionResult.totalPages,
-        totalPages: extractionResult.totalPages,
-        pagesProcessed: extractionResult.totalPages,
-        questionsFound: extractionResult.totalQuestions,
-        statusText: 'Preparing extracted questions...'
+        currentPage: extractionResult.pages.length,
+        totalPages: extractionResult.pages.length,
+        pagesProcessed: extractionResult.pages.length,
+        questionsFound: 0,
+        statusText: 'Parsing questions from text...'
       })
 
-      const questions = extractionResult.questions || []
+      console.log('[BYOP] Calling MCQ parser...')
+      
+      let parseResult
+      try {
+        parseResult = await parseMcqQuestions(extractionResult, processingJobId, paper.file_name)
+      } catch (parserError) {
+        console.error('[BYOP] MCQ PARSER CRASHED:', {
+          processingJobId,
+          error: parserError,
+          message: parserError.message,
+          stack: parserError.stack
+        })
+        throw parserError
+      }
+      
+      const rawQuestions = parseResult.questions || []
+      const questions = rawQuestions.map((q, idx) => ({
+        ...q,
+        question_number: q.question_number || idx + 1,
+        question_text: q.question_text || q.tamil_question || `Question ${idx + 1}`,
+        tamil_question: q.tamil_question || q.question_text || '',
+        option_a: q.option_a || q.options?.A || '',
+        option_b: q.option_b || q.options?.B || '',
+        option_c: q.option_c || q.options?.C || '',
+        option_d: q.option_d || q.options?.D || '',
+        correct_option: q.correct_option || q.correct_answer || null,
+        parser_status: q.parser_status || 'ready',
+        isValid: q.isValid !== false,
+      }))
 
-      console.log('[BYOP] Extracted question summary:', {
+      console.log('[BYOP] MCQ parsing complete:', {
         processingJobId,
         fileName: paper.file_name,
         totalQuestions: questions.length,
@@ -489,6 +918,7 @@ export function BYOPPage() {
           processingJobId,
           fileName: paper.file_name,
           totalPages: extractionResult.totalPages,
+          hasSelectableText: extractionResult.hasSelectableText
         })
         await byopService.update(paper.id, user.id, {
           processing_status: 'failed',
@@ -511,8 +941,8 @@ export function BYOPPage() {
         fileName: paper.file_name,
         questions,
         totalQuestions: questions.length,
-        totalPages: extractionResult.totalPages,
-        processedPages: extractionResult.totalPages,
+        totalPages: extractionResult.pages.length,
+        processedPages: extractionResult.pages.length,
       })
 
       // Determine status based on validation
@@ -523,7 +953,8 @@ export function BYOPPage() {
       console.log('[BYOP] Final status:', {
         processingJobId,
         status: newStatus,
-        totalQuestions: questions.length,
+        questionCandidates: questions.length,
+        completeQuestions: parseResult.completeQuestions || 0,
         validQuestions: validCount,
         needsReview: questions.filter(q => q.parser_status === 'needs_review').length
       })
@@ -539,42 +970,6 @@ export function BYOPPage() {
         previewCount: questionsPreview.length,
         reason: 'Intentional limit - full questions saved when user confirms extraction'
       })
-      
-      // Sanitize Unicode recursively to remove unpaired surrogates
-      const sanitizeUnicode = (value) => {
-        if (typeof value !== 'string') {
-          if (Array.isArray(value)) return value.map(sanitizeUnicode)
-          if (value && typeof value === 'object') {
-            return Object.fromEntries(
-              Object.entries(value).map(([k, v]) => [k, sanitizeUnicode(v)])
-            )
-          }
-          return value
-        }
-        
-        // Remove unpaired surrogates
-        let result = ''
-        for (let i = 0; i < value.length; i++) {
-          const code = value.charCodeAt(i)
-          if (code >= 0xD800 && code <= 0xDBFF) {
-            // High surrogate - check if followed by low surrogate
-            const next = value.charCodeAt(i + 1)
-            if (next >= 0xDC00 && next <= 0xDFFF) {
-              result += value[i] + value[i + 1]
-              i++
-            } else {
-              // Unpaired high surrogate - replace with replacement char
-              result += '\uFFFD'
-            }
-          } else if (code >= 0xDC00 && code <= 0xDFFF) {
-            // Unpaired low surrogate - replace
-            result += '\uFFFD'
-          } else {
-            result += value[i]
-          }
-        }
-        return result
-      }
       
       const sanitizedQuestions = sanitizeUnicode(questionsPreview)
       
@@ -654,18 +1049,18 @@ export function BYOPPage() {
         throw new Error(`JSON serialization failed: ${serErr.message}`)
       }
       
-      // Prepare full payload
-      const storagePayload = {
+      // Prepare full payload with sanitization applied to ALL fields
+      const storagePayload = sanitizeUnicode({
         processing_status: newStatus,
-        total_pages: extractionResult.totalPages,
-        processed_pages: extractionResult.totalPages,
+        total_pages: extractionResult.pages.length,
+        processed_pages: extractionResult.pages.length,
         extracted_count: questions.length,
         questions_json: sanitizedQuestions,
         batch_progress_json: [],
         notes: needsReview
           ? `${questions.length} questions extracted. ${validCount} ready, ${questions.length - validCount} need review.`
-          : `${questions.length} questions extracted from ${extractionResult.totalPages} pages.`,
-      }
+          : `${questions.length} questions extracted from ${extractionResult.pages.length} pages.`,
+      })
       
       console.log('[BYOP] STORAGE PAYLOAD DEBUG:', {
         processingJobId,
@@ -676,7 +1071,9 @@ export function BYOPPage() {
         needsReview: questions.length - validCount,
         payloadKeys: Object.keys(storagePayload),
         questions_json_type: typeof storagePayload.questions_json,
-        questions_json_length: storagePayload.questions_json?.length
+        questions_json_length: storagePayload.questions_json?.length,
+        notes_length: storagePayload.notes?.length,
+        notes_hasNullBytes: /\u0000/.test(storagePayload.notes || '')
       })
       
       // Field-by-field diagnostic test
@@ -694,8 +1091,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 2: Status + counts')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.totalPages,
-          processed_pages: extractionResult.totalPages,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
           extracted_count: questions.length
         })
         console.log('[BYOP] ✓ TEST 2 PASS: Status + counts')
@@ -704,8 +1101,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 3: + batch_progress_json')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.totalPages,
-          processed_pages: extractionResult.totalPages,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
           extracted_count: questions.length,
           batch_progress_json: []
         })
@@ -715,8 +1112,8 @@ export function BYOPPage() {
         console.log('[BYOP] TEST 4: + notes')
         await byopService.update(paper.id, user.id, {
           processing_status: newStatus,
-          total_pages: extractionResult.totalPages,
-          processed_pages: extractionResult.totalPages,
+          total_pages: extractionResult.pages.length,
+          processed_pages: extractionResult.pages.length,
           extracted_count: questions.length,
           batch_progress_json: [],
           notes: storagePayload.notes
@@ -745,10 +1142,11 @@ export function BYOPPage() {
       // await byopService.update(paper.id, user.id, storagePayload)
 
       setPapers(prev => prev.map(p => p.id === paper.id
-        ? { ...p, processing_status: newStatus, extracted_count: questions.length }
+        ? { ...p, processing_status: newStatus, extracted_count: questions.length, questions_json: sanitizedQuestions }
         : p
       ))
 
+      setReviewPaperId(paper.id)
       setShowReview(true)
       toast.success(`${questions.length} questions extracted!${needsReview ? ` ${validCount} ready, ${questions.length - validCount} need review.` : ''}`)
       
@@ -783,73 +1181,109 @@ export function BYOPPage() {
   }
 
   // ── Save questions to DB ───────────────────────────────────────────────────
-  async function handleSaveQuestions(editedQuestions) {
-    if (!result || !activeId) {
-      // Find which paper we're reviewing
-      const paper = papers.find(p => ['extracted','review_required'].includes(p.processing_status))
-      if (!paper) { toast.error('No active extraction to save.'); return }
-      await doSave(paper, editedQuestions)
-      return
-    }
-  }
-
   // called from within an active-paper context
   async function doSave(paper, editedQuestions) {
     setSaving(true)
     try {
-      // Create a draft paper entry in the central papers table
-      const newPaper = await paperService.createPaper({
-        title:            paper.title,
-        exam_name:        'Custom Upload',
-        exam_type:        'Custom',
-        year:             new Date().getFullYear(),
-        subject:          'General',
-        description:      `BYOP upload: ${paper.file_name}`,
-        duration_minutes: 120,
-        status:           'draft',
-        created_by:       user.id,
-      })
+      const match = paper?.notes?.match(/"([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})"/)
+      let targetPaperId = match?.[1]
+
+      if (!targetPaperId) {
+        // Create a published paper entry in the central papers table
+        const newPaper = await paperService.createPaper({
+          title:            paper.title || 'Custom Uploaded Paper',
+          exam_name:        'Custom Upload',
+          exam_type:        'Custom',
+          year:             new Date().getFullYear(),
+          subject:          'General',
+          description:      `BYOP upload: ${paper.file_name}`,
+          duration_minutes: Math.max(30, Math.round(editedQuestions.length * 1.5)),
+          total_questions:  editedQuestions.length,
+          status:           'published',
+          created_by:       user.id,
+        })
+        targetPaperId = newPaper.id
+      } else {
+        await supabase.from('papers').update({
+          status: 'published',
+          total_questions: editedQuestions.length,
+          updated_at: new Date().toISOString()
+        }).eq('id', targetPaperId)
+      }
 
       // Save to questions table (flat schema)
       const toSave = editedQuestions
-        .filter(q => q.question_text?.trim() || q.tamil_question?.trim())
-        .map((q, i) => ({
-          question_number: parseInt(String(q.question_number), 10) || i + 1,
-          question_text:   [q.tamil_question, q.english_question].filter(Boolean).join('\n').trim()
-                           || q.question_text || `Question ${i + 1}`,
-          option_a:        q.option_a || '',
-          option_b:        q.option_b || '',
-          option_c:        q.option_c || '',
-          option_d:        q.option_d || '',
-          correct_option:  q.correct_option ?? null,
-          explanation:     null,
-          // Include Tamil fields
-          question_text_tamil: q.question_text_tamil || q.tamil_question || null,
-          option_a_tamil: q.option_a_tamil || null,
-          option_b_tamil: q.option_b_tamil || null,
-          option_c_tamil: q.option_c_tamil || null,
-          option_d_tamil: q.option_d_tamil || null,
-          explanation_tamil: q.explanation_tamil || null,
-        }))
+        .filter(q => q.question_text?.trim() || q.tamil_question?.trim() || q.english_question?.trim())
+        .map((q, i) => {
+          const eng = (q.question_text_english || q.english_question || '').trim()
+          const tam = (q.question_text_tamil || q.tamil_question || '').trim()
+          let combined = (q.question_text || '').trim()
 
-      await questionService.saveQuestionsToSupabase(newPaper.id, toSave, false)
+          if (eng && tam) {
+            if (!combined.includes('தமிழ்:')) {
+              combined = `${eng}\nதமிழ்: ${tam}`
+            }
+          } else if (!combined) {
+            combined = eng && tam ? `${eng}\nதமிழ்: ${tam}` : (eng || tam || `Question ${i + 1}`)
+          }
+
+          const formatOpt = (engOpt, tamOpt) => {
+            const e = (engOpt || '').trim()
+            const t = (tamOpt || '').trim()
+            if (!t || t === e) return e || t
+            if (!e) return t
+            if (e.includes(' / ')) return e
+            return `${e} / ${t}`
+          }
+
+          return {
+            question_number: parseInt(String(q.question_number), 10) || i + 1,
+            question_text: combined,
+            question_text_tamil: tam || null,
+            option_a: formatOpt(q.option_a || q.options?.A || 'Option A', q.option_a_tamil),
+            option_b: formatOpt(q.option_b || q.options?.B || 'Option B', q.option_b_tamil),
+            option_c: formatOpt(q.option_c || q.options?.C || 'Option C', q.option_c_tamil),
+            option_d: formatOpt(q.option_d || q.options?.D || 'Option D', q.option_d_tamil),
+            option_a_tamil: q.option_a_tamil || null,
+            option_b_tamil: q.option_b_tamil || null,
+            option_c_tamil: q.option_c_tamil || null,
+            option_d_tamil: q.option_d_tamil || null,
+            correct_option: ['A','B','C','D'].includes(q.correct_option || q.correct_answer)
+              ? (q.correct_option || q.correct_answer)
+              : null,
+            explanation: q.explanation || null,
+            explanation_tamil: q.explanation_tamil || null,
+          }
+        })
+
+      await questionService.saveQuestionsToSupabase(targetPaperId, toSave, false)
 
       // Update uploaded_papers record
+      const notesMsg = `${toSave.length} questions saved to paper "${targetPaperId}".`
       await byopService.update(paper.id, user.id, {
         processing_status: 'ready',
         extracted_count:   toSave.length,
-        notes:             `${toSave.length} questions saved to paper "${newPaper.id}".`,
+        questions_json:    sanitizeUnicode(toSave),
+        notes:             notesMsg,
       })
 
       setPapers(prev => prev.map(p => p.id === paper.id
-        ? { ...p, processing_status: 'ready', extracted_count: toSave.length }
+        ? {
+            ...p,
+            processing_status: 'ready',
+            extracted_count: toSave.length,
+            notes: notesMsg,
+            questions_json: toSave
+          }
         : p
       ))
 
       setShowReview(false)
+      setReviewPaperId(null)
       setResult(null)
-      toast.success(`${toSave.length} questions saved! Draft paper created.`)
+      toast.success(`${toSave.length} questions saved! Paper is ready for test attempt.`)
     } catch (err) {
+      console.error('[BYOP] doSave error:', err)
       toast.error('Save failed: ' + err.message)
     } finally {
       setSaving(false)
@@ -867,7 +1301,7 @@ export function BYOPPage() {
           <div>
             <h1 className="text-xl font-bold text-body-text">Bring Your Own Paper</h1>
             <p className="text-xs text-body-secondary">
-              Upload a question paper PDF — the server extracts questions and options automatically
+              Upload selectable-text PDF — local parser extracts questions automatically
             </p>
           </div>
         </div>
@@ -882,14 +1316,52 @@ export function BYOPPage() {
         <input ref={fileRef} type="file" accept=".pdf" className="hidden" onChange={handleFileSelect} />
       </div>
 
-      {/* Pipeline info banner */}
-      <div className="bg-tnpsc-brand-light border border-tnpsc-brand/20 rounded-2xl p-4 flex items-start gap-3">
-        <Layers className="w-5 h-5 text-tnpsc-brand shrink-0 mt-0.5" />
-        <div>
-          <p className="text-sm font-bold text-tnpsc-brand">Server-side PDF Question Extractor</p>
-          <p className="text-xs text-body-secondary mt-0.5">
-            Extracts question text and answer options from selectable-text or scanned PDFs, then saves the questions for review.
-          </p>
+      {/* API Key Missing Notification Banner */}
+      {!hasGeminiApiKey && !apiKeyService.hasUserApiKey() && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-subtle">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+            <div>
+              <p className="text-xs font-bold text-amber-900">Personal Google Gemini API Key Required for AI Vision</p>
+              <p className="text-[11px] text-amber-700 mt-0.5">
+                To extract questions from Tamil, handwritten, or scanned PDFs using Gemini AI, please configure your free Gemini API key in Settings.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => navigate('/profile#api-key')}
+            className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shrink-0 transition-colors shadow-subtle"
+          >
+            Configure Key →
+          </button>
+        </div>
+      )}
+
+      {/* Model selector & info bar */}
+      <div className="bg-white border border-surface-border rounded-2xl p-4 shadow-subtle flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <Sparkles className="w-5 h-5 text-tnpsc-brand shrink-0" />
+          <div>
+            <p className="text-sm font-bold text-body-text">AI Vision & Local PDF Pipeline</p>
+            <p className="text-xs text-body-secondary mt-0.5">
+              Extract questions from Tamil, handwritten, or scanned PDFs. Switch models if any version experiences high traffic.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-bold text-body-secondary whitespace-nowrap">AI Model Version:</label>
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="text-xs font-semibold border border-surface-border rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-tnpsc-brand bg-slate-50 text-body-text cursor-pointer"
+          >
+            {modelsList.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name || m.id}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -916,7 +1388,7 @@ export function BYOPPage() {
       >
         <Upload className="w-10 h-10 text-slate-300 group-hover:text-tnpsc-brand mx-auto mb-3 transition-colors" />
         <p className="text-sm font-semibold text-body-secondary group-hover:text-tnpsc-brand transition-colors">
-          Click to upload a question paper PDF
+          Click to upload selectable-text PDF
         </p>
         <p className="text-xs text-body-secondary mt-1">Max 35 MB · Scanned/image-only PDFs not supported</p>
       </div>
@@ -971,13 +1443,27 @@ export function BYOPPage() {
                   {/* Action buttons */}
                   <div className="flex items-center gap-2 shrink-0">
                     {isProcessable && (
-                      <button
-                        onClick={() => handleProcess(paper)}
-                        disabled={!!activeId}
-                        className="px-3 py-1.5 bg-tnpsc-brand text-white text-xs font-bold rounded-lg hover:bg-tnpsc-brand-hover transition-colors disabled:opacity-40"
-                      >
-                        {paper.processing_status === 'failed' ? 'Retry' : 'Process'}
-                      </button>
+                      
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleProcess(paper, 'ai')}
+                            disabled={!!activeId}
+                            className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white text-xs font-bold rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all shadow-subtle disabled:opacity-40"
+                            title="Extract questions with Gemini AI (Best for Tamil / Scanned / Handwritten PDFs)"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            {paper.processing_status === 'failed' ? 'Retry (AI)' : 'Process with AI'}
+                          </button>
+                          <button
+                            onClick={() => handleProcess(paper, 'local')}
+                            disabled={!!activeId}
+                            className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-body-secondary text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
+                            title="Run offline PDF.js parser (For selectable-text English PDFs)"
+                          >
+                            Local
+                          </button>
+                        </div>
+                      
                     )}
 
                     {/* Attempt Test — for READY papers */}
@@ -985,15 +1471,37 @@ export function BYOPPage() {
                       <AttemptButton paperId={paper.id} userId={user.id} />
                     )}
 
-                    {/* View extracted questions */}
-                    {['extracted','review_required'].includes(paper.processing_status) &&
-                      result?.questions?.length > 0 && activeId === null && (
-                      <button
-                        onClick={() => setShowReview(r => !r)}
-                        className="px-3 py-1.5 bg-tnpsc-brand-light text-tnpsc-brand text-xs font-bold rounded-lg hover:bg-tnpsc-brand hover:text-white transition-colors"
-                      >
-                        {showReview ? 'Hide' : 'Review'} Questions
-                      </button>
+                    {/* View / Review extracted questions */}
+                    {activeId === null && (
+                      (() => {
+                        let qs = []
+                        if (result?.processingJobId?.startsWith(paper.id) && result?.questions?.length > 0) {
+                          qs = result.questions
+                        } else if (Array.isArray(paper.questions_json) && paper.questions_json.length > 0) {
+                          qs = paper.questions_json
+                        } else if (typeof paper.questions_json === 'string' && paper.questions_json.length > 2) {
+                          try { qs = JSON.parse(paper.questions_json) } catch (e) { qs = [] }
+                        }
+                        if (!qs || qs.length === 0) return null
+
+                        const isReviewingThis = showReview && reviewPaperId === paper.id
+                        return (
+                          <button
+                            onClick={() => {
+                              if (isReviewingThis) {
+                                setShowReview(false)
+                                setReviewPaperId(null)
+                              } else {
+                                setReviewPaperId(paper.id)
+                                setShowReview(true)
+                              }
+                            }}
+                            className="px-3 py-1.5 bg-tnpsc-brand-light text-tnpsc-brand text-xs font-bold rounded-lg hover:bg-tnpsc-brand hover:text-white transition-colors"
+                          >
+                            {isReviewingThis ? 'Hide Questions' : (paper.processing_status === 'ready' ? 'View Questions' : 'Review Questions')}
+                          </button>
+                        )
+                      })()
                     )}
                   </div>
                 </div>
@@ -1019,16 +1527,27 @@ export function BYOPPage() {
                 )}
 
                 {/* Inline review panel */}
-                {showReview && result?.questions?.length > 0 && activeId === null &&
-                  paper.processing_status !== 'ready' && (
-                  <div className="border-t border-surface-border p-5">
-                    <QuestionsPanel
-                      questions={result.questions}
-                      onSave={(qs) => doSave(paper, qs)}
-                      saving={saving}
-                    />
-                  </div>
-                )}
+                {showReview && reviewPaperId === paper.id && activeId === null && (() => {
+                  let qs = []
+                  if (result?.processingJobId?.startsWith(paper.id) && result?.questions?.length > 0) {
+                    qs = result.questions
+                  } else if (Array.isArray(paper.questions_json) && paper.questions_json.length > 0) {
+                    qs = paper.questions_json
+                  } else if (typeof paper.questions_json === 'string' && paper.questions_json.length > 2) {
+                    try { qs = JSON.parse(paper.questions_json) } catch (e) { qs = [] }
+                  }
+                  if (!qs || qs.length === 0) return null
+
+                  return (
+                    <div className="border-t border-surface-border p-5">
+                      <QuestionsPanel
+                        questions={qs}
+                        onSave={(editedQs) => doSave(paper, editedQs)}
+                        saving={saving}
+                      />
+                    </div>
+                  )
+                })()}
 
                 {/* Footer metadata */}
                 <div className="flex items-center justify-between px-5 py-3 border-t border-surface-border bg-slate-50 text-[10px] text-body-secondary">
