@@ -22,13 +22,17 @@ export function ExamPage() {
 
   const [answers, setAnswers] = useState({})
   const [markedForReview, setMarkedForReview] = useState({})
-  const [language, setLanguage] = useState('english') // Add language state
+  const [language, setLanguage] = useState('english')
 
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [showSubmitModal, setShowSubmitModal] = useState(false)
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false)
   const [error, setError] = useState(null)
+
+  // Per-question active pacing tracker (seconds spent on each question)
+  const questionTimingsRef = useRef({})
+  const questionEnterTsRef = useRef(Date.now())
 
   // Load active attempt and questions
   useEffect(() => {
@@ -49,6 +53,15 @@ export function ExamPage() {
 
         setPaper(paperData)
         setAttempt(attemptData)
+
+        // Restore any previously recorded per-question timings for this attempt
+        try {
+          const savedTimings = localStorage.getItem(`exam_q_timings_${attemptData.id}`)
+          if (savedTimings) {
+            questionTimingsRef.current = JSON.parse(savedTimings) || {}
+          }
+        } catch {}
+        questionEnterTsRef.current = Date.now()
 
         // Fetch questions in EXAM MODE (excludes correct_option and explanation for security)
         const qList = await questionService.getQuestionsByPaperId(paperId, true)
@@ -73,9 +86,31 @@ export function ExamPage() {
     initExam()
   }, [paperId, user, navigate])
 
+  // Record time spent when switching questions
+  const flushCurrentQuestionTime = useCallback((qId) => {
+    if (!qId || !attempt?.id) return
+    const now = Date.now()
+    const elapsedSec = Math.max(1, Math.round((now - questionEnterTsRef.current) / 1000))
+    questionEnterTsRef.current = now
+    questionTimingsRef.current[qId] = (questionTimingsRef.current[qId] || 0) + elapsedSec
+    try {
+      localStorage.setItem(`exam_q_timings_${attempt.id}`, JSON.stringify(questionTimingsRef.current))
+    } catch {}
+  }, [attempt?.id])
+
+  useEffect(() => {
+    questionEnterTsRef.current = Date.now()
+    return () => {
+      const q = questions[currentIndex]
+      if (q?.id) flushCurrentQuestionTime(q.id)
+    }
+  }, [currentIndex, questions, flushCurrentQuestionTime])
+
   // Submit Handler
   const handleSubmitExam = useCallback(async () => {
     if (!attempt || submitting) return
+    const activeQ = questions[currentIndex]
+    if (activeQ?.id) flushCurrentQuestionTime(activeQ.id)
     setSubmitting(true)
 
     try {
@@ -86,7 +121,7 @@ export function ExamPage() {
       setError(err.message || 'Failed to submit exam attempt.')
       setSubmitting(false)
     }
-  }, [attempt, answers, submitting, navigate])
+  }, [attempt, answers, submitting, navigate, questions, currentIndex, flushCurrentQuestionTime])
 
   // Timer hook
   const { timeLeftSeconds, isExpired } = useTimer(
@@ -99,6 +134,7 @@ export function ExamPage() {
   const handleSelectOption = (optionKey) => {
     if (!questions[currentIndex] || !attempt) return
     const currentQ = questions[currentIndex]
+    flushCurrentQuestionTime(currentQ.id)
 
     const updated = { ...answers, [currentQ.id]: optionKey }
     setAnswers(updated)
@@ -183,22 +219,24 @@ export function ExamPage() {
           {/* Right Header Actions */}
           <div className="flex items-center space-x-3">
             {/* Language Toggle */}
-            <div className="flex items-center bg-white border border-surface-border rounded-lg overflow-hidden">
+            <div className="flex items-center bg-slate-100 rounded-lg p-0.5 border border-surface-border text-xs">
               <button
+                type="button"
                 onClick={() => setLanguage('english')}
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
                   language === 'english'
-                    ? 'bg-primary text-white'
+                    ? 'bg-primary text-white shadow-xs'
                     : 'text-body-secondary hover:text-body-text'
                 }`}
               >
-                EN
+                English
               </button>
               <button
+                type="button"
                 onClick={() => setLanguage('tamil')}
-                className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
                   language === 'tamil'
-                    ? 'bg-primary text-white'
+                    ? 'bg-primary text-white shadow-xs'
                     : 'text-body-secondary hover:text-body-text'
                 }`}
               >

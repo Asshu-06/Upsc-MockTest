@@ -20,8 +20,18 @@ export const paperService = {
       query = query.eq('subject', filters.subject)
     }
     // Filter by exam name (used by Mock Tests, PYQ pages)
+    // Matches exact exam_name OR case-insensitive title patterns for Group 4 / Group 1 / Group 2 papers
     if (filters.examName) {
-      query = query.eq('exam_name', filters.examName)
+      const name = filters.examName
+      if (name.includes('Group 4')) {
+        query = query.or(`exam_name.eq.${name},exam_name.ilike.%Group 4%,title.ilike.%Group 4%,title.ilike.%Group-4%`)
+      } else if (name.includes('Group 1')) {
+        query = query.or(`exam_name.eq.${name},exam_name.ilike.%Group 1%,title.ilike.%Group 1%,title.ilike.%Group-1%`)
+      } else if (name.includes('Group 2')) {
+        query = query.or(`exam_name.eq.${name},exam_name.ilike.%Group 2%,title.ilike.%Group 2%,title.ilike.%Group-2%`)
+      } else {
+        query = query.eq('exam_name', name)
+      }
     }
 
     if (filters.sort === 'year_asc') {
