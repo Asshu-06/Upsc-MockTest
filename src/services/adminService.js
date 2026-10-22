@@ -334,7 +334,7 @@ export const adminAnalyticsService = {
           const topic = classification.topic_name || 'General Concepts'
 
           const isCorrect = ans.is_correct ?? (Boolean(ans.selected_option) && ans.selected_option === q.correct_option)
-          const isSkipped = !ans.selected_option
+          const isSkipped = !ans.selected_option || ans.selected_option === 'E'
           const isWrong = !isSkipped && !isCorrect
 
           if (!subjMap[s]) subjMap[s] = { correct: 0, wrong: 0, skipped: 0, total: 0, units: {} }

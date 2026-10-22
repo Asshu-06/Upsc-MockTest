@@ -6,7 +6,7 @@ export const questionService = {
     
     // In exam mode, do not expose correct_option or explanation to client network responses
     if (isExamMode) {
-      selectFields = 'id, paper_id, question_number, question_text, option_a, option_b, option_c, option_d, question_text_tamil, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil'
+      selectFields = 'id, paper_id, question_number, question_text, option_a, option_b, option_c, option_d, option_e, question_text_tamil, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil, option_e_tamil'
     }
 
     const { data, error } = await supabase
@@ -154,12 +154,14 @@ export const questionService = {
       // CRITICAL: Sanitize all text fields to remove null bytes before database insert
       const sanitized = {
         paper_id: paperId,
+        origin_question_id: q.origin_question_id || null,
         question_number: parseInt(q.question_number, 10),
         question_text: sanitizeDatabaseText(q.question_text || ''),
         option_a: sanitizeDatabaseText(optA),
         option_b: sanitizeDatabaseText(optB),
         option_c: sanitizeDatabaseText(optC),
         option_d: sanitizeDatabaseText(optD),
+        option_e: sanitizeDatabaseText(q.option_e || 'Answer not known'),
         correct_option: validOpt,
         explanation: sanitizeDatabaseText(q.explanation || q.extraction_notes || null),
         question_text_tamil: sanitizeDatabaseText(q.question_text_tamil || q.tamil_question || null),
@@ -167,6 +169,7 @@ export const questionService = {
         option_b_tamil: sanitizeDatabaseText(q.option_b_tamil || null),
         option_c_tamil: sanitizeDatabaseText(q.option_c_tamil || null),
         option_d_tamil: sanitizeDatabaseText(q.option_d_tamil || null),
+        option_e_tamil: sanitizeDatabaseText(q.option_e_tamil || 'விடை தெரியவில்லை'),
         explanation_tamil: sanitizeDatabaseText(q.explanation_tamil || null)
       }
 

@@ -66,27 +66,31 @@ export function MockTestsPage() {
       if (selectedExam === 'TNPSC Group 1') {
         generatedTest = await testGeneratorService.generateGroup1Test({
           quotaResolutionMode: 'normalize_to_200',
-          strict: false,
-          allowFallback: true,
+          userId: user.id,
+          strict: true,
+          allowFallback: false,
         })
       } else if (selectedExam === 'TNPSC Group 2/2A') {
         generatedTest = await testGeneratorService.generateGroup2Test({
           languageSpecialization: selectedLanguage,
-          strict: false,
-          allowFallback: true,
+          userId: user.id,
+          strict: true,
+          allowFallback: false,
         })
       } else if (selectedExam === 'TNPSC Group 4') {
         generatedTest = await testGeneratorService.generateGroup4Test({
           languageSpecialization: selectedLanguage,
-          strict: false,
-          allowFallback: true,
+          userId: user.id,
+          strict: true,
+          allowFallback: false,
         })
       } else {
         // Fallback test generation using Group 1 matrix standard
         generatedTest = await testGeneratorService.generateGroup1Test({
           quotaResolutionMode: 'normalize_to_200',
-          strict: false,
-          allowFallback: true,
+          userId: user.id,
+          strict: true,
+          allowFallback: false,
         })
       }
 

@@ -30,6 +30,12 @@ export function QuestionCard({
     { 
       key: 'D', 
       text: language === 'tamil' ? question.option_d_tamil || question.option_d : question.option_d 
+    },
+    {
+      key: 'E',
+      text: language === 'tamil'
+        ? question.option_e_tamil || 'விடை தெரியவில்லை'
+        : question.option_e || 'Answer not known'
     }
   ]
 
@@ -39,7 +45,7 @@ export function QuestionCard({
 
   const isReviewMode = mode === 'review'
   const isCorrect = isReviewMode && selectedOption === correctOption
-  const isUnanswered = isReviewMode && !selectedOption
+  const isUnanswered = isReviewMode && (!selectedOption || selectedOption === 'E')
 
   return (
     <div className="bg-white rounded-xl border border-surface-border p-6 shadow-card space-y-6">

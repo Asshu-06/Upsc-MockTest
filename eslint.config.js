@@ -8,6 +8,7 @@ export default [
       'node_modules/**',
       'coverage/**',
       '.venv/**',
+      '.vercel/**',
       'public/pdfjs/**',
     ],
   },

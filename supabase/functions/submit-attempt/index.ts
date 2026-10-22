@@ -11,7 +11,7 @@ const CORS_HEADERS = {
 
 interface AnswerItem {
   question_id: string;
-  selected_option: "A" | "B" | "C" | "D" | null;
+  selected_option: "A" | "B" | "C" | "D" | "E" | null;
 }
 
 interface SubmitPayload {
@@ -136,7 +136,9 @@ serve(async (req) => {
       let isCorrect: boolean | null = null;
       let marksObtained = 0;
 
-      if (!selected) {
+      // E is the explicit "answer not known" choice and is intentionally
+      // scored exactly like a skipped response.
+      if (!selected || selected === "E") {
         unansweredCount++;
         isCorrect = null;
         marksObtained = 0;

@@ -930,7 +930,7 @@ export function calculateMicroTopicXRay(attempts = []) {
       }
 
       microStats[key].attempted += 1
-      const isCorrect = ans.is_correct ?? (Boolean(ans.selected_option) && ans.selected_option === q.correct_option)
+      const isCorrect = ans.is_correct ?? (Boolean(ans.selected_option) && ans.selected_option !== 'E' && ans.selected_option === q.correct_option)
       if (isCorrect) microStats[key].correct += 1
     })
   })

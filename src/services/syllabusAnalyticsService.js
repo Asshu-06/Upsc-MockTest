@@ -1018,8 +1018,6 @@ export const syllabusAnalyticsService = {
     userAttempts.forEach(attempt => {
       const answers = attempt.attempt_answers || []
       answers.forEach(ans => {
-        if (!ans.selected_option) return
-
         const qId = String(ans.question_id)
         let microId = questionToMicroMap.get(qId)
 
@@ -1037,6 +1035,9 @@ export const syllabusAnalyticsService = {
         if (microId && microBuckets.has(microId)) {
           const bucket = microBuckets.get(microId)
           bucket.bankQuestionIds.add(qId)
+          // A question shown in a completed test counts as seen. A skipped/E
+          // response contributes zero correct answers but remains in the
+          // mastery denominator, so skipping cannot inflate mastery.
           bucket.attemptedQuestionIds.add(qId)
           bucket.totalAttempts += 1
           if (ans.is_correct === true) {

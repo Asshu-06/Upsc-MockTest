@@ -301,7 +301,9 @@ BEGIN
             END IF;
         END LOOP;
 
-        IF v_selected IS NULL OR v_selected = '' THEN
+        -- Option E means "answer not known" and must remain unattempted.
+        IF v_selected IS NULL OR v_selected = '' OR v_selected = 'E' THEN
+            v_selected := NULL;
             v_unanswered_count := v_unanswered_count + 1;
             v_is_correct := NULL;
             v_q_marks := 0;

@@ -6,7 +6,8 @@
  * 2. Language Specialization Logic for Group 2 (100 Language Qs + 100 GS/Aptitude Qs = 200 Qs)
  * 3. Exact difficulty balancing (30% Easy, 50% Medium, 20% Hard)
  * 4. Deduplication & Fisher-Yates randomized sampling without replacement
- * 5. Strict pool validation (InsufficientQuestionPoolError) and graceful fallback modes
+ * 5. Strict pool validation (InsufficientQuestionPoolError). Exam papers are
+ *    never padded with fabricated placeholder questions.
  */
 
 import { supabase } from '../lib/supabase.js'
@@ -177,8 +178,17 @@ export function sampleBucketWithoutReplacement(pool, count, usedIds = new Set(),
     return (!id || !usedIds.has(id)) && (!textNorm || !usedTexts.has(textNorm))
   })
 
-  const shuffled = fisherYatesShuffle(available, rng)
-  const selected = shuffled.slice(0, count)
+  // Prefer never-seen questions. Only when a bucket is exhausted do we remix
+  // previously seen items, starting with the least-seen set.
+  const unseen = available.filter(q => !q._times_seen)
+  const selected = fisherYatesShuffle(unseen, rng).slice(0, count)
+  if (selected.length < count) {
+    const needed = count - selected.length
+    const seen = available
+      .filter(q => q._times_seen)
+      .sort((a, b) => (a._times_seen - b._times_seen) || String(a.id).localeCompare(String(b.id)))
+    selected.push(...fisherYatesShuffle(seen, rng).slice(0, needed))
+  }
 
   selected.forEach(q => {
     if (q.id) usedIds.add(q.id)
@@ -191,39 +201,6 @@ export function sampleBucketWithoutReplacement(pool, count, usedIds = new Set(),
     selected,
     availableCount: available.length,
     deficit: Math.max(0, count - selected.length)
-  }
-}
-
-// ─── Synthetic Template Generator for Mock Backfill ──────────────────────────
-
-export function createSyntheticQuestion({
-  paperId,
-  questionNumber,
-  examName = 'TNPSC Group 1',
-  unitCode,
-  unitName,
-  difficultyLevel = 'medium',
-  partCode = 'PART_A',
-  subject = 'General Studies',
-}) {
-  const diffLabel = difficultyLevel.toUpperCase()
-  return {
-    id: `syn-gen-${unitCode}-${difficultyLevel}-${questionNumber}-${Math.random().toString(36).slice(2, 7)}`,
-    paper_id: paperId || null,
-    question_number: questionNumber,
-    question_text: `[${examName} - ${unitName}] (${diffLabel} Standard Assessment Question ${questionNumber}) Which of the following statements is conceptually correct regarding ${unitName}?`,
-    option_a: `Statement A is thoroughly substantiated by standard academic syllabus for ${unitName}.`,
-    option_b: `Statement B is an alternative contextual hypothesis often tested in competitive examinations.`,
-    option_c: `Statement C is partially supported under specific historical or constitutional provisions.`,
-    option_d: `Statement D represents an exception to general statutory principles.`,
-    correct_option: ['A', 'B', 'C', 'D'][Math.floor(Math.random() * 4)],
-    explanation: `Detailed explanation: Option is verified against the official syllabus curriculum for ${unitName} (${diffLabel} tier).`,
-    difficulty_level: difficultyLevel,
-    part_code: partCode,
-    unit_code: unitCode,
-    unit_name: unitName,
-    group_name: examName,
-    tags: [examName, unitCode, unitName, difficultyLevel],
   }
 }
 
@@ -241,8 +218,9 @@ export const testGeneratorService = {
       quotaResolutionMode = 'normalize_to_200', // 'normalize_to_200' | 'raw_210'
       customQuotas = null,
       questionPoolProvider = null,
-      strict = false,
-      allowFallback = true,
+      userId = null,
+      strict = true,
+      allowFallback = false,
       rng = Math.random,
     } = options
 
@@ -284,6 +262,7 @@ export const testGeneratorService = {
             groupName: 'TNPSC Group 1',
             unitCode: unitRow.unitCode,
             difficultyLevel: diff,
+            userId,
           })
         }
 
@@ -335,12 +314,14 @@ export const testGeneratorService = {
                   unitId: unitRow.unitId,
                   unitName: unitRow.unitName,
                   difficultyLevel: altDiff,
+                  userId,
                 })
               } else {
                 altPool = await this.fetchQuestionBankPool({
                   groupName: 'TNPSC Group 1',
                   unitCode: unitRow.unitCode,
                   difficultyLevel: altDiff,
+                  userId,
                 })
               }
 
@@ -358,26 +339,8 @@ export const testGeneratorService = {
               }
             }
 
-            // Synthetic backfill if still short
-            const remainingDeficit = deficit - backfilled
-            for (let k = 0; k < remainingDeficit; k++) {
-              const qNum = selectedQuestions.length + 1
-              const synQ = createSyntheticQuestion({
-                questionNumber: qNum,
-                examName: 'TNPSC Group 1',
-                unitCode: unitRow.unitCode,
-                unitName: unitRow.unitName,
-                difficultyLevel: diff,
-                partCode: unitRow.partCode,
-              })
-              selectedQuestions.push(synQ)
-              usedIds.add(synQ.id)
-              fallbacks.push({
-                unitCode: unitRow.unitCode,
-                originalDiff: diff,
-                fallbackType: 'synthetic_template',
-                count: 1,
-              })
+            if (backfilled < deficit) {
+              throw new InsufficientQuestionPoolError({ bucket: `${unitRow.unitCode} (${unitRow.unitName})`, unitCode: unitRow.unitCode, unitName: unitRow.unitName, difficultyLevel: diff, requested: requiredCount, available: availableCount + backfilled, deficit: deficit - backfilled })
             }
           }
         }
@@ -434,8 +397,9 @@ export const testGeneratorService = {
     const {
       languageSpecialization = 'General Tamil', // 'General English' | 'General Tamil'
       questionPoolProvider = null,
-      strict = false,
-      allowFallback = true,
+      userId = null,
+      strict = true,
+      allowFallback = false,
       rng = Math.random,
     } = options
 
@@ -500,6 +464,7 @@ export const testGeneratorService = {
             groupName: 'TNPSC Group 2/2A',
             unitCode: unitRow.unitCode,
             difficultyLevel: diff,
+            userId,
             tags: [selectedLang, unitRow.unitCode],
           })
         }
@@ -552,12 +517,14 @@ export const testGeneratorService = {
                   unitName: unitRow.unitName,
                   languageSpecialization: selectedLang,
                   difficultyLevel: altDiff,
+                  userId,
                 })
               } else {
                 altPool = await this.fetchQuestionBankPool({
                   groupName: 'TNPSC Group 2/2A',
                   unitCode: unitRow.unitCode,
                   difficultyLevel: altDiff,
+                  userId,
                 })
               }
 
@@ -575,27 +542,7 @@ export const testGeneratorService = {
               }
             }
 
-            // Synthetic backfill
-            const remainingDeficit = deficit - backfilled
-            for (let k = 0; k < remainingDeficit; k++) {
-              const qNum = selectedQuestions.length + 1
-              const synQ = createSyntheticQuestion({
-                questionNumber: qNum,
-                examName: 'TNPSC Group 2/2A',
-                unitCode: unitRow.unitCode,
-                unitName: unitRow.unitName,
-                difficultyLevel: diff,
-                partCode: unitRow.partCode,
-              })
-              selectedQuestions.push(synQ)
-              usedIds.add(synQ.id)
-              fallbacks.push({
-                unitCode: unitRow.unitCode,
-                originalDiff: diff,
-                fallbackType: 'synthetic_template',
-                count: 1,
-              })
-            }
+            if (backfilled < deficit) throw new InsufficientQuestionPoolError({ bucket: `${unitRow.unitCode} (${unitRow.unitName})`, unitCode: unitRow.unitCode, unitName: unitRow.unitName, difficultyLevel: diff, requested: requiredCount, available: availableCount + backfilled, deficit: deficit - backfilled })
           }
         }
       }
@@ -652,8 +599,9 @@ export const testGeneratorService = {
     const {
       languageSpecialization = 'General Tamil', // 'General English' | 'General Tamil'
       questionPoolProvider = null,
-      strict = false,
-      allowFallback = true,
+      userId = null,
+      strict = true,
+      allowFallback = false,
       rng = Math.random,
     } = options
 
@@ -722,6 +670,7 @@ export const testGeneratorService = {
             groupName: 'TNPSC Group 4',
             unitCode: unitRow.unitCode,
             difficultyLevel: diff,
+            userId,
             languageSpecialization: selectedLang,
           })
         }
@@ -775,12 +724,14 @@ export const testGeneratorService = {
                   unitName: unitRow.unitName,
                   languageSpecialization: selectedLang,
                   difficultyLevel: altDiff,
+                  userId,
                 })
               } else {
                 altPool = await this.fetchQuestionBankPool({
                   groupName: 'TNPSC Group 4',
                   unitCode: unitRow.unitCode,
                   difficultyLevel: altDiff,
+                  userId,
                   languageSpecialization: selectedLang,
                 })
               }
@@ -799,27 +750,7 @@ export const testGeneratorService = {
               }
             }
 
-            // Synthetic backfill
-            const remainingDeficit = deficit - backfilled
-            for (let k = 0; k < remainingDeficit; k++) {
-              const qNum = selectedQuestions.length + 1
-              const synQ = createSyntheticQuestion({
-                questionNumber: qNum,
-                examName: 'TNPSC Group 4',
-                unitCode: unitRow.unitCode,
-                unitName: unitRow.unitName,
-                difficultyLevel: diff,
-                partCode: unitRow.partCode,
-              })
-              selectedQuestions.push(synQ)
-              usedIds.add(synQ.id)
-              fallbacks.push({
-                unitCode: unitRow.unitCode,
-                originalDiff: diff,
-                fallbackType: 'synthetic_template',
-                count: 1,
-              })
-            }
+            if (backfilled < deficit) throw new InsufficientQuestionPoolError({ bucket: `${unitRow.unitCode} (${unitRow.unitName})`, unitCode: unitRow.unitCode, unitName: unitRow.unitName, difficultyLevel: diff, requested: requiredCount, available: availableCount + backfilled, deficit: deficit - backfilled })
           }
         }
       }
@@ -866,7 +797,7 @@ export const testGeneratorService = {
    * Helper to fetch candidate questions from Supabase public.questions
    * Resiliently finds published papers for the exam group and queries real questions
    */
-  async fetchQuestionBankPool({ groupName, unitCode, difficultyLevel, languageSpecialization, tags = [] }) {
+  async fetchQuestionBankPool({ groupName, unitCode, difficultyLevel, languageSpecialization, tags = [], userId = null }) {
     try {
       let papersQuery = supabase
         .from('papers')
@@ -887,17 +818,29 @@ export const testGeneratorService = {
       if (pErr || !papers || papers.length === 0) return []
 
       const paperIds = papers.map(p => p.id)
-      const { data: qData, error: qErr } = await supabase
+      let questionQuery = supabase
         .from('questions')
-        .select('id, question_number, question_text, option_a, option_b, option_c, option_d, correct_option, explanation, question_text_tamil, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil, explanation_tamil')
+        .select('id, question_number, question_text, option_a, option_b, option_c, option_d, option_e, correct_option, explanation, question_text_tamil, option_a_tamil, option_b_tamil, option_c_tamil, option_d_tamil, option_e_tamil, explanation_tamil, source_type, exam_tag, subject_name, unit_code, macro_topic, micro_topic, sub_topic, question_type, cognitive_skill, ideal_time_seconds, difficulty_level, part_code, group_name, tags')
         .in('paper_id', paperIds)
+        .eq('unit_code', unitCode)
+        .ilike('difficulty_level', difficultyLevel)
+        .eq('source_type', 'VINA')
         .limit(200)
+
+      const { data: qData, error: qErr } = await questionQuery
 
       if (qErr) {
         console.warn('[testGeneratorService] DB fetch note:', qErr.message)
         return []
       }
-      return qData || []
+      if (!userId || !qData?.length) return qData || []
+      const { data: history, error: historyErr } = await supabase
+        .from('user_question_history')
+        .select('question_id, times_seen')
+        .eq('user_id', userId)
+      if (historyErr) throw historyErr
+      const historyByQuestion = new Map((history || []).map(row => [row.question_id, row.times_seen]))
+      return qData.map(question => ({ ...question, _times_seen: historyByQuestion.get(question.id) || 0 }))
     } catch (e) {
       console.warn('[testGeneratorService] Query caught:', e)
       return []
@@ -948,12 +891,14 @@ export const testGeneratorService = {
     // 2. Insert questions for this paper (clean DB columns only)
     const questionRecords = generatedTest.questions.map((q, idx) => ({
       paper_id: paper.id,
+      origin_question_id: q.id,
       question_number: idx + 1,
       question_text: q.question_text,
       option_a: q.option_a,
       option_b: q.option_b,
       option_c: q.option_c,
       option_d: q.option_d,
+      option_e: q.option_e || 'Answer not known',
       correct_option: q.correct_option || 'A',
       explanation: q.explanation || null,
       question_text_tamil: q.question_text_tamil || null,
@@ -961,7 +906,21 @@ export const testGeneratorService = {
       option_b_tamil: q.option_b_tamil || null,
       option_c_tamil: q.option_c_tamil || null,
       option_d_tamil: q.option_d_tamil || null,
+      option_e_tamil: q.option_e_tamil || 'விடை தெரியவில்லை',
       explanation_tamil: q.explanation_tamil || null,
+      source_type: q.source_type,
+      exam_tag: q.exam_tag,
+      subject_name: q.subject_name,
+      unit_code: q.unit_code,
+      macro_topic: q.macro_topic,
+      micro_topic: q.micro_topic,
+      sub_topic: q.sub_topic,
+      question_type: q.question_type,
+      cognitive_skill: q.cognitive_skill,
+      ideal_time_seconds: q.ideal_time_seconds,
+      difficulty_level: q.difficulty_level,
+      part_code: q.part_code,
+      group_name: q.group_name,
     }))
 
     await questionService.saveQuestionsToSupabase(paper.id, questionRecords, true)
